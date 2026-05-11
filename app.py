@@ -38,7 +38,7 @@ from silero_vad import (
 SAMPLE_RATE = 16000
 VAD_CHUNK = 512                  # samples per VAD chunk @16 kHz
 SILENCE_MS = 1500                # tự dừng khi im lặng 1.5s
-USER_PAUSE_SEC = 1.5             # nghỉ 1.5s sau turn user trước khi sang câu kế
+USER_PAUSE_SEC = 0.6             # nghỉ ngắn sau turn user trước khi sang câu kế
 MAX_RECORDING_SEC = 90           # an toàn: dừng cứng sau 90s
 DEFAULT_INPUT_DIR = "./input"
 DEFAULT_OUTPUT_DIR = "./output"
@@ -327,9 +327,13 @@ def audio_to_data_url(audio_or_path) -> str | None:
         return None
 
 
+_MAX_EMBED_PAST = 6  # chỉ nhúng audio cho 6 turn quá khứ gần nhất → chat HTML không phình
+
+
 def _bubble_html(state: dict, i: int, role_state: str) -> str:
     """Build 1 bubble theo role + state ('past' | 'current' | 'future')."""
     dialog = state["dialog"]
+    idx = state.get("current_turn", 0)
     turn = dialog[i]
     is_user = turn["role"] == "user"
     if is_user:
@@ -338,7 +342,9 @@ def _bubble_html(state: dict, i: int, role_state: str) -> str:
         avatar, role_name, side_cls = "🎙️", "Bạn — CTV thu âm", "assistant-side"
 
     audio_html = ""
-    if role_state == "past":
+    if role_state == "past" and i >= idx - _MAX_EMBED_PAST:
+        # Chỉ nhúng audio cho các turn quá khứ gần (≤ _MAX_EMBED_PAST trở lại).
+        # Turn cũ hơn chỉ hiển thị text → giảm kích thước HTML, tránh lag UI.
         cache: dict = state.setdefault("_audio_url_cache", {})
         cache_key = ("u", i) if is_user else ("a", i)
         if cache_key not in cache:
@@ -350,8 +356,9 @@ def _bubble_html(state: dict, i: int, role_state: str) -> str:
             cache[cache_key] = audio_to_data_url(src)
         url = cache[cache_key]
         if url:
+            # preload="none" → browser chỉ tải/giải mã khi CTV bấm Play
             audio_html = (
-                f'<audio controls preload="metadata" '
+                f'<audio controls preload="none" '
                 f'src="{url}" class="bubble-audio"></audio>'
             )
 
@@ -524,11 +531,9 @@ def _render(state: dict):
                 value=None,
                 label="🔊 (Không tách được audio cho câu này — bấm Tiếp theo)",
             )
-        print(f"[render] câu {idx + 1}/{total} = USER → user_panel visible")
     else:
         # assistant turn — hiện mic component cho CTV ghi âm
         out[6] = gr.update(visible=True, value=None)  # mic_audio
-        print(f"[render] câu {idx + 1}/{total} = ASSISTANT → mic_audio visible")
 
     return tuple(out)
 
@@ -578,18 +583,11 @@ def action_load(input_dir: str, dialog_name: str, output_dir: str, collab_name: 
 def action_next(state: dict):
     dialog = state.get("dialog", [])
     idx = state.get("current_turn", 0)
-    role = dialog[idx]["role"] if idx < len(dialog) else "N/A"
-    print(f"[action_next] called: idx={idx}, role={role}, total={len(dialog)}")
     if idx >= len(dialog) or dialog[idx]["role"] != "user":
-        # TRUE no-op: không re-render gì cả. Quan trọng vì sự kiện
-        # user_audio.stop có thể bắn nhầm khi đang ở turn assistant
-        # (do action_start_record set user_audio value=None) — nếu trả
-        # _render(state) sẽ ghi đè recording_panel khiến UI ghi âm biến mất.
-        print(f"[action_next] true no-op (not user turn)")
+        # TRUE no-op cho trường hợp user_audio.stop bắn nhầm ở turn assistant
         return tuple([state] + [gr.update() for _ in range(13)])
     time.sleep(USER_PAUSE_SEC)
     state["current_turn"] = idx + 1
-    print(f"[action_next] advanced → idx={state['current_turn']}")
     return _render(state)
 
 
@@ -761,34 +759,73 @@ def action_finish(state: dict):
 
 # ---------- Build UI ----------
 CSS = """
-.gradio-container { max-width: 1280px !important; margin: auto; padding-top: 8px; }
+/* ============================================================
+   CSS variables  —  hằng số layout responsive
+   ============================================================ */
+:root {
+  --container-max: 1320px;
+  --sidebar-w: clamp(240px, 22vw, 300px);
+  --sidebar-gap: 20px;
+  --avatar-w: 38px;
+  --avatar-gap: 10px;
+  --bubble-offset: calc(var(--avatar-w) + var(--avatar-gap));
+  --bubble-w: clamp(320px, 60%, 620px);
+  --font-bubble: clamp(15px, 0.6vw + 13px, 17px);
+  --font-bubble-lg: clamp(18px, 0.6vw + 16px, 22px);
+}
+
+.gradio-container {
+  max-width: var(--container-max) !important;
+  margin: auto !important;
+  padding: 8px clamp(12px, 1.5vw, 24px) !important;
+}
+
+/* ============================================================
+   Buttons
+   ============================================================ */
 .big-btn button {
-    font-size: 20px !important;
-    padding: 18px 36px !important;
-    font-weight: 700 !important;
-    min-height: 60px !important;
+  font-size: clamp(15px, 0.4vw + 14px, 18px) !important;
+  padding: clamp(12px, 1vw + 6px, 18px) clamp(20px, 2vw, 32px) !important;
+  font-weight: 700 !important;
+  min-height: 52px !important;
 }
 .huge-btn button {
-    font-size: 24px !important;
-    padding: 22px 44px !important;
-    font-weight: 800 !important;
-    min-height: 76px !important;
-    box-shadow: 0 4px 14px rgba(16,185,129,.25) !important;
+  font-size: clamp(18px, 0.7vw + 14px, 22px) !important;
+  padding: clamp(16px, 1.2vw + 8px, 22px) clamp(28px, 2.5vw, 40px) !important;
+  font-weight: 800 !important;
+  min-height: clamp(60px, 5vw + 30px, 76px) !important;
+  box-shadow: 0 4px 14px rgba(16,185,129,.25) !important;
 }
+
 .app-title { text-align: center; padding: 6px 0 0; }
+.app-title h1 { font-size: clamp(22px, 1.4vw + 16px, 30px) !important; }
 .app-subtitle {
-    text-align: center; color: #6B7280; font-size: 16px;
-    margin: -10px 0 18px;
+  text-align: center; color: #6B7280;
+  font-size: clamp(13px, 0.4vw + 11px, 16px);
+  margin: -10px 0 18px;
 }
+
+/* ============================================================
+   Guide box (4 bước)
+   ============================================================ */
 .guide-box {
-    background: linear-gradient(135deg, #EFF6FF 0%, #ECFDF5 100%);
-    border: 1px solid #BFDBFE;
-    border-radius: 14px;
-    padding: 18px 24px;
-    margin: 4px 0 18px;
+  background: linear-gradient(135deg, #EFF6FF 0%, #ECFDF5 100%);
+  border: 1px solid #BFDBFE;
+  border-radius: 14px;
+  padding: clamp(12px, 1vw + 6px, 18px) clamp(16px, 1.5vw + 8px, 24px);
+  margin: 4px 0 18px;
 }
-.guide-box h3 { margin: 0 0 8px; color: #1E3A8A; }
-.guide-box ol { margin: 0; padding-left: 22px; line-height: 1.85; font-size: 15px; }
+.guide-box h3 {
+  margin: 0 0 8px;
+  color: #1E3A8A;
+  font-size: clamp(15px, 0.5vw + 13px, 18px);
+}
+.guide-box ol {
+  margin: 0;
+  padding-left: 22px;
+  line-height: 1.75;
+  font-size: clamp(13px, 0.3vw + 12px, 15px);
+}
 .guide-box li b { color: #065F46; }
 .start-row { display: flex; gap: 12px; align-items: end; }
 
@@ -1004,13 +1041,12 @@ CSS = """
 .msg-row.current-row {
   margin: 14px 0 4px;
 }
-/* Cố định 55% width để khớp chính xác với button bên dưới */
 .bubble.bubble-large {
-  width: 55%;
-  max-width: 55%;
+  width: var(--bubble-w);
+  max-width: var(--bubble-w);
   flex: 0 0 auto;
-  padding: 18px 22px;
-  font-size: 18px;
+  padding: clamp(14px, 1vw + 8px, 20px) clamp(16px, 1.2vw + 10px, 24px);
+  font-size: var(--font-bubble-lg);
   box-shadow: 0 4px 16px rgba(16,185,129,.18), 0 0 0 3px rgba(16,185,129,.25);
   box-sizing: border-box;
 }
@@ -1018,7 +1054,7 @@ CSS = """
   box-shadow: 0 4px 16px rgba(59,130,246,.18), 0 0 0 3px rgba(59,130,246,.25);
 }
 .bubble-text.bubble-text-lg {
-  font-size: 22px;
+  font-size: var(--font-bubble-lg);
   font-weight: 600;
   line-height: 1.55;
 }
@@ -1045,12 +1081,12 @@ CSS = """
 /* ===== Welcome screen ===== */
 .welcome-screen {
   max-width: 580px !important;
-  margin: 40px auto !important;
-  padding: 14px;
+  margin: clamp(20px, 4vh, 50px) auto !important;
+  padding: clamp(8px, 1.5vw, 16px);
 }
 .welcome-card {
   text-align: center;
-  padding: 28px 24px 8px;
+  padding: clamp(20px, 2vw + 14px, 32px) clamp(16px, 1.5vw + 10px, 28px) 8px;
   background: linear-gradient(135deg, #EFF6FF 0%, #ECFDF5 100%);
   border-radius: 18px;
   border: 1px solid #BFDBFE;
@@ -1058,10 +1094,16 @@ CSS = """
   box-shadow: 0 6px 24px rgba(59,130,246,.10);
 }
 .welcome-emoji {
-  font-size: 48px;
+  font-size: clamp(36px, 3vw + 24px, 52px);
   margin-bottom: 4px;
 }
-.welcome-card h1 { color: #1E3A8A; font-size: 28px; }
+.welcome-card h1 {
+  color: #1E3A8A;
+  font-size: clamp(22px, 1.6vw + 14px, 30px);
+}
+.welcome-card p {
+  font-size: clamp(14px, 0.4vw + 12px, 17px);
+}
 .welcome-divider {
   height: 1px;
   background: rgba(0,0,0,.08);
@@ -1070,19 +1112,20 @@ CSS = """
 .welcome-input-row {
   align-items: center !important;
   gap: 8px !important;
+  flex-wrap: wrap !important;
 }
 #ctv-name-input textarea, #ctv-name-input input {
-  font-size: 19px !important;
-  padding: 16px 18px !important;
-  height: 60px !important;
+  font-size: clamp(15px, 0.5vw + 13px, 19px) !important;
+  padding: clamp(12px, 1vw + 6px, 18px) !important;
+  height: clamp(50px, 4vw + 32px, 60px) !important;
   border-radius: 14px !important;
   border: 2px solid #BFDBFE !important;
 }
 .welcome-input-row .huge-btn { flex: 0 0 auto; }
 .welcome-input-row .huge-btn button {
-  height: 60px !important;
-  padding: 0 28px !important;
-  font-size: 18px !important;
+  height: clamp(50px, 4vw + 32px, 60px) !important;
+  padding: 0 clamp(20px, 2vw, 32px) !important;
+  font-size: clamp(15px, 0.5vw + 13px, 18px) !important;
 }
 
 /* CTV banner ở đầu màn hình chính */
@@ -1107,23 +1150,23 @@ CSS = """
   flex-direction: column !important;
 }
 
-/* Sidebar luôn ở giữa viewport bên phải, không bao giờ scroll theo content.
-   Dùng position: fixed → element ra khỏi flow → bù lại bằng margin-right
-   của cột làm việc để không chồng lên nhau. */
+/* Sidebar luôn ở giữa viewport bên phải, không scroll theo content.
+   right offset = max(sidebar-gap, lề trái/phải khi container centered).
+   → Trên màn lớn (vw > container-max), sidebar bám đúng mép phải container.
+   → Trên màn nhỏ, sidebar bám mép phải viewport với padding tối thiểu. */
 .sidebar-col {
   position: fixed !important;
-  right: 24px !important;
+  right: max(var(--sidebar-gap), calc((100vw - var(--container-max)) / 2 + var(--sidebar-gap))) !important;
   top: 50% !important;
   transform: translateY(-50%) !important;
-  width: 280px !important;
-  max-width: 280px !important;
-  /* KHÔNG đặt max-height + overflow:auto vì sẽ clip dropdown popup */
+  width: var(--sidebar-w) !important;
+  max-width: var(--sidebar-w) !important;
   overflow: visible !important;
   z-index: 100 !important;
   background: linear-gradient(135deg, #F0FDF4 0%, #ECFDF5 100%);
   border: 1px solid #BBF7D0;
   border-radius: 14px;
-  padding: 14px !important;
+  padding: clamp(10px, 1vw, 16px) !important;
   box-shadow: 0 8px 28px rgba(16,185,129,.18);
 }
 /* Bảo đảm popup không bị wrapper clip nhưng RIÊNG popup vẫn scroll được */
@@ -1150,13 +1193,11 @@ CSS = """
   overflow-y: auto !important;
   overflow-x: hidden !important;
 }
-/* Mọi nội dung trong màn chính (header, guide, chat ...) đều chừa chỗ
-   bên phải cho sidebar fixed (280px width + 24px right + 24px gap). */
+/* Mọi nội dung màn chính chừa khoảng cho sidebar fixed (sidebar-w + 2*gap). */
 .main-screen {
-  padding-right: 328px !important;
+  padding-right: calc(var(--sidebar-w) + var(--sidebar-gap) * 2) !important;
 }
 .main-work-col {
-  /* đã có padding-right từ parent main-screen */
   margin-right: 0 !important;
 }
 .sidebar-header {
@@ -1187,25 +1228,44 @@ CSS = """
   color: #047857 !important;
 }
 
-/* ===== Action components canh thẳng theo bubble role =====
-   Parent (gr.Blocks col) là flex-column → dùng align-self để xếp trái/phải */
+/* ============================================================
+   Action components — canh theo bubble role (parent flex-column)
+   Width khớp --bubble-w, offset = --bubble-offset (avatar+gap)
+   ============================================================ */
 
-/* Record button — bám sát bubble assistant (phải), cùng width */
-#record-btn {
+#record-btn,
+#mic-audio,
+#stop-record-btn,
+.recording-row {
   align-self: flex-end !important;
-  width: 55% !important;
-  max-width: 55% !important;
-  margin: 6px 48px 14px 0 !important;
-  padding: 0 !important;
+  width: var(--bubble-w) !important;
+  max-width: var(--bubble-w) !important;
+  margin: 6px var(--bubble-offset) 14px 0 !important;
   box-sizing: border-box !important;
 }
+.user-action-row {
+  align-self: flex-start !important;
+  width: var(--bubble-w) !important;
+  max-width: var(--bubble-w) !important;
+  margin: 6px 0 14px var(--bubble-offset) !important;
+  box-sizing: border-box !important;
+}
+
+#record-btn, #stop-record-btn { padding: 0 !important; }
+.recording-row {
+  background: transparent !important;
+  border: none !important;
+  padding: 0 !important;
+}
+
+/* Style nút Record (xanh emerald) */
 #record-btn button {
   width: 100% !important;
   border-radius: 18px !important;
-  font-size: 22px !important;
+  font-size: clamp(18px, 0.7vw + 14px, 22px) !important;
   font-weight: 800 !important;
-  padding: 22px 24px !important;
-  min-height: 76px !important;
+  padding: clamp(16px, 1.2vw + 8px, 22px) 24px !important;
+  min-height: clamp(60px, 5vw + 30px, 76px) !important;
   background: linear-gradient(135deg, #10B981 0%, #059669 100%) !important;
   color: #fff !important;
   border: none !important;
@@ -1218,31 +1278,14 @@ CSS = """
   box-shadow: 0 6px 20px rgba(16,185,129,.40), 0 0 0 4px rgba(16,185,129,.25) !important;
 }
 
-/* Mic component (CTV ghi âm) — cùng vị trí với bubble assistant */
-#mic-audio {
-  align-self: flex-end !important;
-  width: 55% !important;
-  max-width: 55% !important;
-  margin: 6px 48px 8px 0 !important;
-  box-sizing: border-box !important;
-}
-
-/* Nút lớn KẾT THÚC GHI ÂM — cùng width bubble assistant, màu đỏ rõ rệt */
-#stop-record-btn {
-  align-self: flex-end !important;
-  width: 55% !important;
-  max-width: 55% !important;
-  margin: 4px 48px 14px 0 !important;
-  padding: 0 !important;
-  box-sizing: border-box !important;
-}
+/* Style nút Stop (đỏ pulse) */
 #stop-record-btn button {
   width: 100% !important;
   border-radius: 18px !important;
-  font-size: 22px !important;
+  font-size: clamp(18px, 0.7vw + 14px, 22px) !important;
   font-weight: 800 !important;
-  padding: 22px 24px !important;
-  min-height: 76px !important;
+  padding: clamp(16px, 1.2vw + 8px, 22px) 24px !important;
+  min-height: clamp(60px, 5vw + 30px, 76px) !important;
   background: linear-gradient(135deg, #DC2626 0%, #991B1B 100%) !important;
   color: #fff !important;
   border: none !important;
@@ -1258,25 +1301,74 @@ CSS = """
   50%      { box-shadow: 0 4px 14px rgba(220,38,38,.35), 0 0 0 14px rgba(220,38,38,0); }
 }
 
-/* Recording panel — cùng vị trí (assistant side), cùng width bubble */
-.recording-row {
-  align-self: flex-end !important;
-  width: 55% !important;
-  max-width: 55% !important;
-  margin: 6px 48px 14px 0 !important;
-  padding: 0 !important;
-  background: transparent !important;
-  border: none !important;
-  box-sizing: border-box !important;
+/* ============================================================
+   Responsive breakpoints
+   ============================================================ */
+
+/* Laptop nhỏ ≤1200px: sidebar gọn hơn */
+@media (max-width: 1200px) {
+  :root {
+    --sidebar-w: 240px;
+    --bubble-w: clamp(280px, 65%, 540px);
+  }
+  .chat-history { max-height: 380px; }
 }
 
-/* User panel — bám sát bubble khách hàng (trái), cùng width bubble */
-.user-action-row {
-  align-self: flex-start !important;
-  width: 55% !important;
-  max-width: 55% !important;
-  margin: 6px 0 14px 48px !important;
-  box-sizing: border-box !important;
+/* Tablet ≤900px: sidebar chuyển xuống dưới content (1 cột) */
+@media (max-width: 900px) {
+  :root {
+    --bubble-w: 78%;
+    --bubble-offset: 0px;
+  }
+  .main-screen {
+    padding-right: clamp(12px, 2vw, 24px) !important;
+  }
+  .sidebar-col {
+    position: static !important;
+    transform: none !important;
+    width: 100% !important;
+    max-width: 100% !important;
+    margin: 12px 0 !important;
+  }
+  .main-2col {
+    flex-direction: column !important;
+  }
+  .msg-row.user-side .bubble, .msg-row.assistant-side .bubble {
+    max-width: 88%;
+  }
+  .bubble.bubble-large { width: 88% !important; max-width: 88% !important; }
+  #record-btn, #mic-audio, #stop-record-btn,
+  .recording-row, .user-action-row {
+    width: 88% !important;
+    max-width: 88% !important;
+    margin-left: 0 !important;
+    margin-right: 0 !important;
+    align-self: center !important;
+  }
+  .avatar { width: 32px; height: 32px; font-size: 18px; }
+}
+
+/* Mobile ≤600px: thu gọn font, avatar, sidebar full width */
+@media (max-width: 600px) {
+  :root {
+    --bubble-w: 92%;
+  }
+  .gradio-container { padding: 6px 8px !important; }
+  .guide-box ol { padding-left: 18px; }
+  .guide-box ul { padding-left: 16px; }
+  .bubble { max-width: 92% !important; padding: 10px 12px; font-size: 15px; }
+  .bubble.bubble-large { width: 92% !important; max-width: 92% !important; padding: 12px 14px; }
+  .bubble-text { font-size: 15px; margin-bottom: 6px; }
+  .bubble-text.bubble-text-lg { font-size: 16px; }
+  .role-label { font-size: 11px; }
+  .turn-num { display: block; }
+  .avatar { width: 28px; height: 28px; font-size: 16px; }
+  .chat-history { max-height: 320px; padding: 10px 4px; }
+  .welcome-input-row { flex-direction: column !important; }
+  .welcome-input-row #ctv-name-input,
+  .welcome-input-row .huge-btn { width: 100% !important; }
+  .welcome-card h1 { font-size: 22px; }
+  .ctv-banner { font-size: 12px; padding: 6px 10px; }
 }
 """
 
@@ -1385,6 +1477,7 @@ with gr.Blocks(
 
                 # Micro client (browser) qua gr.Audio — dùng được với gradio.live.
                 # CTV bấm nút "Record" sẵn có trong component để bắt đầu.
+                # KHÔNG bật show_recording_waveform vì canvas rendering có thể gây lag.
                 mic_audio = gr.Audio(
                     sources=["microphone"],
                     type="numpy",
@@ -1393,7 +1486,6 @@ with gr.Blocks(
                     elem_id="mic-audio",
                     elem_classes=["mic-audio"],
                     visible=True,
-                    waveform_options={"show_recording_waveform": True},
                 )
 
                 # Nút lớn "Kết thúc" hiện sau khi CTV bắt đầu ghi —
