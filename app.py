@@ -247,6 +247,9 @@ def segment_user_turns(wav_path: str, dialog: list[dict]):
             print(f"[segment] {os.path.basename(wav_path)}: "
                   f"dùng timestamps có sẵn (SR wav = {sr}Hz)")
 
+            # Cắt nhanh theo timestamps, KHÔNG trim ở đây.
+            # trim_silences() sẽ chạy lazy (1 lần / 1 turn) trong
+            # get_trimmed_user_audio() khi audio thực sự cần phát.
             result: dict[int, tuple | None] = {}
             n_samples = len(audio_np)
             for i, turn in enumerate(dialog):
@@ -262,10 +265,7 @@ def segment_user_turns(wav_path: str, dialog: list[dict]):
                 if end <= start:
                     result[i] = None
                     continue
-                seg = audio_np[start:end]
-                # Trim silence dài ở đầu/cuối + nén silence giữa
-                seg_trimmed = trim_silences(seg, sr)
-                result[i] = (sr, seg_trimmed)
+                result[i] = (sr, audio_np[start:end])
             return result
         except Exception as exc:
             print(f"[Warn] Không cắt được theo timestamps: {exc}")
@@ -293,8 +293,8 @@ def segment_user_turns(wav_path: str, dialog: list[dict]):
                 continue
             if i < n_segs:
                 t = timestamps[i]
-                seg = audio_np[t["start"]: t["end"]]
-                result[i] = (SAMPLE_RATE, trim_silences(seg, SAMPLE_RATE))
+                # Cắt thô, trim lazy về sau
+                result[i] = (SAMPLE_RATE, audio_np[t["start"]: t["end"]])
             else:
                 result[i] = None
         return result
@@ -304,6 +304,27 @@ def segment_user_turns(wav_path: str, dialog: list[dict]):
 
 
 # ---------- UI rendering helpers ----------
+
+
+def get_trimmed_user_audio(state: dict, idx: int):
+    """Lazy-trim audio user turn `idx`: lần đầu chạy silero-vad, lần sau lấy cache.
+
+    Nhờ vậy `action_load` chỉ cắt thô theo timestamps (rất nhanh), không
+    chạy VAD trên tất cả user turn cùng lúc. VAD chỉ tốn ~50ms / turn, chạy
+    rải đều khi từng turn được phát/render.
+    """
+    raw = state.get("user_audio_per_turn", {}).get(idx)
+    if raw is None:
+        return None
+    cache = state.setdefault("_trim_cache", {})
+    if idx in cache:
+        return cache[idx]
+    sr, seg = raw
+    trimmed = trim_silences(seg, sr)
+    if trimmed is None or len(trimmed) == 0:
+        trimmed = seg
+    cache[idx] = (sr, trimmed)
+    return cache[idx]
 
 
 def audio_to_data_url(audio_or_path) -> str | None:
@@ -348,8 +369,10 @@ def _bubble_html(state: dict, i: int, role_state: str) -> str:
         cache: dict = state.setdefault("_audio_url_cache", {})
         cache_key = ("u", i) if is_user else ("a", i)
         if cache_key not in cache:
+            # User audio: dùng bản trimmed (lazy + cached)
+            # Assistant: lấy filepath đã ghi
             src = (
-                state.get("user_audio_per_turn", {}).get(i)
+                get_trimmed_user_audio(state, i)
                 if is_user
                 else state.get("recordings", {}).get(i)
             )
@@ -522,7 +545,8 @@ def _render(state: dict):
     out[1] = gr.update(value=progress_html(idx, total))
 
     if turn["role"] == "user":
-        audio = state.get("user_audio_per_turn", {}).get(idx)
+        # Lazy-trim audio cho turn hiện tại (cache trong state)
+        audio = get_trimmed_user_audio(state, idx)
         out[4] = gr.update(visible=True)  # user_panel
         if audio is not None:
             out[5] = gr.update(value=audio, autoplay=True)
