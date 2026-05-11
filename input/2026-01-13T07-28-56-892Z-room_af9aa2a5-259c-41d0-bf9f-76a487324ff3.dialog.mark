@@ -1,0 +1,24 @@
+speaker_0: xin chào chị linh em là trợ lý của ngân hàng gọi để hỗ trợ chị hoàn tất hồ sơ mở thẻ hiện tại chị có tiện nghe máy không ạ
+speaker_1: có đang nghe đây
+speaker_0: hiện hồ sơ mở thẻ của chị đang tạm dừng do chưa đủ thông tin em xin phép hỏi một số thông tin để hoàn tất hồ sơ cho chị nhé chị vui lòng cho em biết tên trường tiểu học của chị được không ạ
+speaker_1: đặng trần côn
+speaker_0: em cảm ơn chị chị vui lòng cho em biết số nhà và tên đường trên chứng minh nhân dân hoặc căn cước công dân của chị được không ạ
+speaker_1: năm tám năm sạch mười bốn tư vạn hạnh
+speaker_2: hiện tại
+speaker_0: em cảm ơn chị chị vui lòng cho em biết phường hoặc xã ghi trên chứng minh nhân dân hoặc căn cước công dân của chị được không ạ
+speaker_1: hoa không được # sai
+speaker_0: chị vui lòng cho em biết phường hoặc xã ghi trên chứng minh nhân dân hoặc căn cước công dân của chị được không ạ
+speaker_1: hòa hưng
+speaker_0: em cảm ơn chị chị vui lòng cho em biết tỉnh hoặc thành phố ghi trên chứng minh nhân dân hoặc căn cước công dân của chị được không ạ
+speaker_1: hồ chí minh
+speaker_0: em cảm ơn chị chị vui lòng cho em xin địa chỉ email của chị được không ạ
+speaker_1: hải linh chấm võ a móc gmail chấm com
+speaker_0: chị vui lòng cho em xin địa chỉ email của chị được không ạ
+speaker_1: hải linh chấm võ a còng gmail chấm com
+speaker_0: em xin phép xác nhận lại chị vui lòng cho em biết đầy đủ địa chỉ email bao gồm cả phần trước a còng gmail - com được không ạ
+speaker_1: hải linh chấm võ a còng gmail chấm com
+speaker_2: em # noise + halluciation
+speaker_0: em nghe chưa rõ địa chỉ email của chị chị vui lòng cho em biết lại đầy đủ địa chỉ email của mình được không ạ
+speaker_1: hải linh chấm võ a còng gmail chấm com
+speaker_0: em nghe chưa rõ địa chỉ email của chị chị vui lòng cho em biết lại đầy đủ địa chỉ email bao gồm cả phần trước a còng gmail - com được không ạ
+speaker_1: mình sụp # halluciation

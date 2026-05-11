@@ -1,0 +1,31 @@
+speaker_0: ngủ chết bỏ
+speaker_1: xin chào chị linh em là trợ lý của ngân hàng vib gọi để hỗ trợ chị hoàn tất hồ sơ mở thẻ hiện tại chị có tiện nghe máy không ạ
+speaker_0: có
+speaker_1: hiện hồ sơ mở thẻ của chị cần thêm một số thông tin em xin phép hỏi một số thông tin để hoàn tất hồ sơ cho chị nhé chị vui lòng cho em biết tên trường tiểu học của chị được không ạ
+speaker_0: đặng trần côn
+speaker_1: em xin phép xác nhận lại tên trường tiểu học của chị là đặt chân côn đúng không ạ
+speaker_0: đặng trần côn
+speaker_1: em nghe chưa rõ ạ chị vui lòng nhắc lại tên trường tiểu học của chị được không ạ
+speaker_0: đặng trần côn
+speaker_1: em cảm ơn chị chị vui lòng cho em biết số nhà và tên đường trên chứng minh thư hoặc căn cước của chị được không ạ
+speaker_0: năm tám năm sạch mười bốn sư vạn hạnh
+speaker_1: em cảm ơn chị chị vui lòng cho em biết phường hoặc xã ghi trên chứng minh thư hoặc căn cước của chị được không ạ
+speaker_0: hòa hưng phường hòa hưng
+speaker_1: em cảm ơn chị chị vui lòng cho em biết phường hoặc xã ghi trên chứng minh thư của chị được không ạ
+speaker_0: phường hòa hưng
+speaker_1: em cảm ơn chị chị vui lòng cho em biết tỉnh hoặc thành phố ghi trên chứng minh thư của chị được không ạ
+speaker_0: hồ chí minh
+speaker_1: em cám ơn chị chị vui lòng cho em biết tỉnh hoặc thành phố ghi trên chứng minh thư của chị được không ạ
+speaker_0: hồ chí minh
+speaker_1: em cảm ơn chị chị vui lòng cho em xin địa chỉ email của chị được không ạ
+speaker_0: hải linh chấm võ a còng gmail chấm com
+speaker_1: em xin xác nhận lại địa chỉ email của chị là v o a còng gmail chấm com đúng không ạ
+speaker_0: không
+speaker_1: em cảm ơn chị đã phản hồi chị vui lòng cho em biết lại địa chỉ email đầy đủ của chị được không ạ
+speaker_0: hải linh chấm võ a còng gmail chấm com
+speaker_1: em cảm ơn chị đã phản hồi chị vui lòng cho em biết lại đầy đủ địa chỉ email của chị được không ạ
+speaker_3: dẹp
+speaker_0: <<unk>>
+speaker_3: rồi # halluciation
+speaker_0: đâu trời # halluciation
+speaker_1: em cảm ơn chị chị vui lòng cho em biết lại đầy

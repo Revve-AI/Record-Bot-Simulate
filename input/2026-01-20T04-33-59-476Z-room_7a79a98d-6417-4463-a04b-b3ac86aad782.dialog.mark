@@ -1,0 +1,39 @@
+speaker_0: chị cho em hỏi hiện tại chị có tiện nghe máy không ạ em là trợ lý của ngân hàng vib gọi để hỗ trợ hoàn tất hồ sơ mở thẻ cho chị
+speaker_1: nghe đây
+speaker_0: em cảm ơn chị đã dành thời gian em gọi vì hồ sơ mở thẻ của chị đang thiếu một số thông tin em xin phép hỏi chị một số câu để hoàn tất hồ sơ nhé chị vui lòng cho em biết số điện thoại mà chị đang sử dụng gồm mười chữ số được không ạ
+speaker_1: không chín không sáu ba ba không
+speaker_0: {"error":"The following operation failed in the TorchScript interpreter.\nTraceback of TorchScript, serialized code (most recent call last):\n  File \"code/__torch__.py\", line 13, in forward\n    _0 = __torch__.icefall.utils.make_pad_mask\n    encoder_embed = self.encoder_embed\n    _1 = (encoder_embed).forward(features, feature_lengths, )\n          ~~~~~~~~~~~~~~~~~~~~~~ <--- HERE\n    x, x_lens, = _1\n    src_key_padding_mask = _0(x_lens, 0, )\n  File \"code/__torch__/subsampling.py\", line 19, in forward\n    x0 = torch.unsqueeze(x, 1)\n    conv = self.conv\n    x1 = (conv).forward(x0, )\n          ~~~~~~~~~~~~~ <--- HERE\n    convnext = self.convnext\n    x2 = (convnext).forward(x1, )\n  File \"code/__torch__/torch/nn/modules/container.py\", line 35, in forward\n    input5 = (_5).forward(input4, )\n    input6 = (_6).forward(input5, )\n    input7 = (_7).forward(input6, )\n              ~~~~~~~~~~~ <--- HERE\n    input8 = (_8).forward(input7, )\n    return (_9).forward(input8, )\n  File \"code/__torch__/torch/nn/modules/conv/___torch_mangle_1.py\", line 23, in forward\n    weight = self.weight\n    bias = self.bias\n    _0 = (self)._conv_forward(input, weight, bias, )\n          ~~~~~~~~~~~~~~~~~~~ <--- HERE\n    return _0\n  def _conv_forward(self: __torch__.torch.nn.modules.conv.___torch_mangle_1.Conv2d,\n  File \"code/__torch__/torch/nn/modules/conv/___torch_mangle_1.py\", line 29, in _conv_forward\n    weight: Tensor,\n    bias: Optional[Tensor]) -> Tensor:\n    _1 = torch.conv2d(input, weight, bias, [1, 2], [0, 0], [1, 1])\n         ~~~~~~~~~~~~ <--- HERE\n    return _1\n\nTraceback of TorchScript, original code (most recent call last):\n  File \"/workspace/icefall/egs/librispeech/ASR/./zipformer/export.py\", line 279, in forward\n            feature_lengths: (N,)\n        \"\"\"\n        x, x_lens = self.encoder_embed(features, feature_lengths)\n                    ~~~~~~~~~~~~~~~~~~ <--- HERE\n    \n        src_key_padding_mask = make_pad_mask(x_lens)\n  File \"/workspace/icefall/egs/librispeech/ASR/zipformer/subsampling.py\", line 309, in forward\n        # training, since the weights in the first convolution are otherwise the limiting factor for getting infinite\n        # gradients.\n        x = self.conv(x)\n            ~~~~~~~~~ <--- HERE\n        x = self.convnext(x)\n    \n  File \"/opt/conda/lib/python3.11/site-packages/torch/nn/modules/container.py\", line 219, in forward\n    def forward(self, input):\n        for module in self:\n            input = module(input)\n                    ~~~~~~ <--- HERE\n        return input\n  File \"/opt/conda/lib/python3.11/site-packages/torch/nn/modules/conv.py\", line 458, in forward\n    def forward(self, input: Tensor) -> Tensor:\n        return self._conv_forward(input, self.weight, self.bias)\n               ~~~~~~~~~~~~~~~~~~ <--- HERE\n  File \"/opt/conda/lib/python3.11/site-packages/torch/nn/modules/conv.py\", line 454, in _conv_forward\n                            weight, bias, self.stride,\n                            _pair(0), self.dilation, self.groups)\n        return F.conv2d(input, weight, bias, self.stride,\n               ~~~~~~~~ <--- HERE\n                        self.padding, self.dilation, self.groups)\nRuntimeError: Calculated padded input size per channel: (2 x 39). Kernel size: (3 x 3). Kernel size can't be greater than actual input size\n","filename":"298d61ba-b173-4a2f-89d3-dfee2693ab5f.wav"}
+speaker_1: năm chín không
+speaker_0: dạ em xin phép hỏi lại để xác nhận chị vui lòng cho em biết đầy đủ mười số điện thoại mà chị đang sử dụng được không ạ
+speaker_1: không chín không sáu ba ba không năm chín không
+speaker_0: dạ em xin phép xác nhận lại số điện thoại chị vừa cung cấp là không chín không sáu ba văn non đúng không ạ
+speaker_1: đúng rồi
+speaker_0: em cảm ơn chị chị cho em hỏi hiện tại chị đang làm nghề gì ạ chị cho em hỏi hiện tại chị đang làm nghề gì ạ
+speaker_1: gồm sinh viên
+speaker_0: dạ chị cho em biết nghề nghiệp hiện tại của mình là gì để em ghi nhận thông tin nhá
+speaker_1: sinh viên
+speaker_0: dạ chị cho em hỏi tên trường mà chị đang theo học là gì ạ
+speaker_1: à m i t # R M I T
+speaker_0: dạ em đã ghi nhận chị cho em hỏi chị bắt đầu học ở trường này từ năm nào ạ
+speaker_1: hai không hai mươi
+speaker_0: dạ em cảm ơn chị chị cho em xin địa chỉ trường gồm số nhà và tên đường được không ạ
+speaker_1: nhà tên đường chờ tí nhá kiếm
+speaker_0: dạ em đợi chị nhé khi nào chị sẵn sàng chị cho em xin địa chỉ trường gồm số nhà và tên đường giúp em ạ
+speaker_1: bảy không hai nguyễn văn linh
+speaker_0: em cảm ơn chị chị cho em hỏi phường hoặc xã nơi trường chị đang học là gì ạ
+speaker_1: tân hưng
+speaker_0: em cảm ơn chị chị cho em hỏi trường chị nằm ở tỉnh hoặc thành phố nào ạ
+speaker_1: hồ chí minh
+speaker_0: em cảm ơn chị chị vui lòng cho em xin số điện thoại tham chiếu để em hoàn tất thông tin hồ sơ cho chị được không ạ
+speaker_1: ờ vậy
+speaker_0: dạ
+speaker_1: bảy ba hai hai ba bốn năm
+speaker_0: em xin em cảm ơn chị chị vui lòng cho em biết địa chỉ nhận thẻ gồm số nhà và tên đường giúp em với ạ
+speaker_1: a mười hai không năm telex insta
+speaker_0: dạ em chưa nghe rõ địa chỉ nhận thẻ chị vui lòng cho em xin lại số nhà và tên đường nơi chị muốn nhận thẻ được không ạ
+speaker_1: a mười hai không năm telise in mista
+speaker_0: dạ em xin phép hỏi
+speaker_1: em xin phép hỏi
+speaker_0: em cảm ơn chị chị cho em hỏi tên trường tiểu học đầu tiên mà chị đã học là gì ạ
+speaker_1: đặng trần khôn # nhận diện sai
+speaker_0: em cảm ơn chị em đã ghi nhận đầy đủ thông tin chị cung cấp ngân hàng sẽ tiếp tục xử lý hồ sơ và liên hệ lại với chị nếu cần bổ sung thêm em cảm ơn chị đã dành thời gian chúc chị một ngày tốt lành
