@@ -157,11 +157,13 @@ def insert_commas(text: str) -> str:
             text, flags=re.IGNORECASE,
         )
 
-    # 3) Trước cụm "<title> vui lòng / cho em / xin / xác nhận" giữa câu dài
+    # 3) Trước cụm "<title> vui lòng / cho em / xin / xác nhận" — chỉ thêm
+    # phẩy nếu cụm đó KHÔNG đứng đầu chuỗi (có nội dung ≥ 1 ký tự trước đó).
+    # Pattern đơn giản, không backtracking exponential.
     text = re.sub(
-        r"((?:\b[^,.!?]+\b\s+){5,}?)"
+        r"(?<=\S)\s+"
         r"((?:anh chị|anh|chị|em|cô|chú|cháu|mình)\s+(?:vui lòng|cho em|xin phép|xác nhận))",
-        lambda m: f"{m.group(1).rstrip()}, {m.group(2)}",
+        lambda m: f", {m.group(1)}",
         text, flags=re.IGNORECASE,
     )
 

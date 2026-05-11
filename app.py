@@ -47,6 +47,20 @@ print("[Init] Đang tải mô hình silero-vad ...")
 VAD_MODEL = load_silero_vad()
 print("[Init] Đã tải xong.")
 
+# Warm-up VAD — JIT compile graph ngay từ đầu, tránh action_load đầu tiên
+# bị chậm 1-3s do silero-vad lần đầu chạy.
+print("[Init] Warm-up silero-vad ...")
+_t0 = time.time()
+try:
+    _warm = np.zeros(SAMPLE_RATE, dtype=np.float32)  # 1s silence
+    _ = get_speech_timestamps(
+        torch.from_numpy(_warm), VAD_MODEL, sampling_rate=SAMPLE_RATE,
+        threshold=0.4, min_silence_duration_ms=400, min_speech_duration_ms=80,
+    )
+    print(f"[Init] Warm-up xong ({1000*(time.time()-_t0):.0f}ms)")
+except Exception as _exc:
+    print(f"[Init] Warm-up lỗi: {_exc}")
+
 
 # ---------- Text normalization ----------
 from text_utils import normalize_vietnamese_text  # noqa: E402
@@ -309,9 +323,8 @@ def segment_user_turns(wav_path: str, dialog: list[dict]):
 def get_trimmed_user_audio(state: dict, idx: int):
     """Lazy-trim audio user turn `idx`: lần đầu chạy silero-vad, lần sau lấy cache.
 
-    Nhờ vậy `action_load` chỉ cắt thô theo timestamps (rất nhanh), không
-    chạy VAD trên tất cả user turn cùng lúc. VAD chỉ tốn ~50ms / turn, chạy
-    rải đều khi từng turn được phát/render.
+    Nếu trim vượt ngưỡng thời gian (>800ms) thì giữ nguyên segment thô
+    để tránh treo UI.
     """
     raw = state.get("user_audio_per_turn", {}).get(idx)
     if raw is None:
@@ -320,7 +333,11 @@ def get_trimmed_user_audio(state: dict, idx: int):
     if idx in cache:
         return cache[idx]
     sr, seg = raw
+    t0 = time.time()
     trimmed = trim_silences(seg, sr)
+    dt = time.time() - t0
+    if dt > 0.3:
+        print(f"[trim] turn {idx}: silero-vad mất {1000*dt:.0f}ms (seg {len(seg)} samples)")
     if trimmed is None or len(trimmed) == 0:
         trimmed = seg
     cache[idx] = (sr, trimmed)
@@ -564,7 +581,10 @@ def _render(state: dict):
 
 # ---------- Actions ----------
 def action_load(input_dir: str, dialog_name: str, output_dir: str, collab_name: str):
+    print(f"[load] CALLED  dialog={dialog_name!r}  input_dir={input_dir!r}  "
+          f"output_dir={output_dir!r}  collab={collab_name!r}")
     if not dialog_name:
+        print("[load] EARLY RETURN — dialog_name rỗng")
         empty = {}
         out = list(_render(empty))
         out[2] = gr.update(
@@ -572,36 +592,54 @@ def action_load(input_dir: str, dialog_name: str, output_dir: str, collab_name: 
         )
         return tuple(out)
 
-    dialog_path = os.path.join(input_dir, dialog_name)
-    wav_path = dialog_path.replace(".dialog", ".wav")
+    try:
+        t0 = time.time()
+        dialog_path = os.path.join(input_dir, dialog_name)
+        wav_path = dialog_path.replace(".dialog", ".wav")
+        print(f"[load] step 1: paths OK  wav={wav_path}")
 
-    dialog = parse_dialog_file(dialog_path)
-    if not dialog:
-        empty = {}
-        out = list(_render(empty))
-        out[2] = gr.update(
-            value="<div style='padding:20px;color:#dc2626;'>⚠️ File hội thoại trống.</div>"
-        )
-        return tuple(out)
+        dialog = parse_dialog_file(dialog_path)
+        if not dialog:
+            print("[load] EARLY RETURN — dialog rỗng")
+            empty = {}
+            out = list(_render(empty))
+            out[2] = gr.update(
+                value="<div style='padding:20px;color:#dc2626;'>⚠️ File hội thoại trống.</div>"
+            )
+            return tuple(out)
+        t1 = time.time()
+        print(f"[load] step 2: parsed {len(dialog)} turns  ({1000*(t1-t0):.0f}ms)")
 
-    user_audio_per_turn = segment_user_turns(wav_path, dialog)
+        user_audio_per_turn = segment_user_turns(wav_path, dialog)
+        t2 = time.time()
+        print(f"[load] step 3: segmented {len(user_audio_per_turn)} user turns  ({1000*(t2-t1):.0f}ms)")
 
-    # output/<tên CTV>/<dialog stem>/
-    session_dir = session_output_dir(output_dir, collab_name, dialog_name)
-    os.makedirs(session_dir, exist_ok=True)
+        session_dir = session_output_dir(output_dir, collab_name, dialog_name)
+        os.makedirs(session_dir, exist_ok=True)
 
-    state = {
-        "collab_name": collab_name,
-        "dialog_name": dialog_name,
-        "dialog_path": dialog_path,
-        "wav_path": wav_path,
-        "output_dir": session_dir,
-        "dialog": dialog,
-        "user_audio_per_turn": user_audio_per_turn,
-        "recordings": {},
-        "current_turn": 0,
-    }
-    return _render(state)
+        state = {
+            "collab_name": collab_name,
+            "dialog_name": dialog_name,
+            "dialog_path": dialog_path,
+            "wav_path": wav_path,
+            "output_dir": session_dir,
+            "dialog": dialog,
+            "user_audio_per_turn": user_audio_per_turn,
+            "recordings": {},
+            "current_turn": 0,
+        }
+        print(f"[load] step 4: state ready, calling _render ...")
+        out = _render(state)
+        t3 = time.time()
+        print(f"[load] DONE  parse={1000*(t1-t0):.0f}ms  "
+              f"segment={1000*(t2-t1):.0f}ms  render={1000*(t3-t2):.0f}ms  "
+              f"total={1000*(t3-t0):.0f}ms")
+        return out
+    except Exception as exc:
+        import traceback
+        print(f"[load] EXCEPTION: {exc}")
+        traceback.print_exc()
+        raise
 
 
 def action_next(state: dict):
