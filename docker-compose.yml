@@ -1,0 +1,19 @@
+services:
+  recorder:
+    image: ${IMAGE:-asia-southeast1-docker.pkg.dev/revve-infra-dev/revve-dev/record-bot-simulate:dev-latest}
+    container_name: record-bot-simulate
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:7860:7860"
+    environment:
+      PORT: "7860"
+      SHARE: "0"
+    volumes:
+      - /mnt/data/recorder/input:/app/input:ro
+      - /mnt/data/recorder/output:/app/output
+      - /mnt/data/recorder/cache/torch:/root/.cache/torch
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
