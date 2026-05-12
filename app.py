@@ -603,6 +603,149 @@ def action_finish(state: dict):
     )
 
 
+# ---------- Picker render helpers ----------
+
+def _estimate_duration_min(num_turns: int) -> int:
+    """Rough estimate — 25s per turn average."""
+    return max(1, round(num_turns * 25 / 60))
+
+
+def _count_turns(input_dir: str, dialog_name: str) -> int:
+    try:
+        return len(parse_dialog_file(os.path.join(input_dir, dialog_name)))
+    except Exception:
+        return 0
+
+
+def render_picker_html(
+    input_dir: str, output_dir: str, collab: str, filt: str
+) -> str:
+    """Build the full picker page as a single HTML string."""
+    from progress_tracking import list_partial, suggest_next
+
+    all_dialogs = list_dialogs(input_dir)
+    done_set = {n for n in all_dialogs if is_dialog_done(n, output_dir, collab)}
+    partial = list_partial(output_dir, collab) if collab else {}
+    next_suggested = suggest_next(output_dir, collab, all_dialogs) if collab else None
+
+    total = len(all_dialogs)
+    done_count = len(done_set)
+    todo_count = total - done_count
+
+    # ----- Top bar -----
+    name_label = collab or "Đặt tên"
+    top_bar = (
+        "<div class='studio-topbar'>"
+        "<div class='studio-logo'><span class='dot'></span>Studio</div>"
+        "<div class='studio-spacer'></div>"
+        f"<span class='studio-top-chip'>Tổng <b>{done_count}/{total}</b></span>"
+        f"<span class='studio-name-pill' onclick='studioPromptForName()'>👤 {name_label}</span>"
+        "</div>"
+    )
+
+    # ----- Hero CTA — only if we have a collab name and a suggestion -----
+    cta_html = ""
+    if next_suggested:
+        n = next_suggested
+        idx = all_dialogs.index(n["dialog_name"]) + 1
+        if n["kind"] == "resume":
+            title = "Thu tiếp câu kế tiếp chưa hoàn thành"
+            sub = (
+                f"Hội thoại #{idx} · dừng ở câu {n['last_recorded_turn'] + 1}"
+            )
+        else:
+            title = "Bắt đầu hội thoại tiếp theo"
+            sub = f"Hội thoại #{idx} · {_count_turns(input_dir, n['dialog_name'])} câu"
+        cta_html = (
+            "<div class='studio-cta' data-resume-cta>"
+            "<div class='icon'>▶</div>"
+            f"<div class='copy'><div class='title'>{title}</div>"
+            f"<div class='sub'>{sub}</div></div>"
+            "<button class='go-btn'>Bắt đầu →</button>"
+            "</div>"
+        )
+
+    # ----- Section + filters -----
+    filters_html = ""
+    for key, label, n in [
+        ("todo", "Chưa thu", todo_count),
+        ("done", "Đã xong", done_count),
+        ("all", "Tất cả", total),
+    ]:
+        cls = "studio-filter active" if filt == key else "studio-filter"
+        filters_html += (
+            f'<span data-filter="{key}" class="{cls}">{label} '
+            f'<span style="opacity:.7">{n}</span></span>'
+        )
+
+    section_head = (
+        "<div class='studio-section-head'>"
+        "<div>"
+        "<div class='studio-section-title'>Chọn hội thoại</div>"
+        f"<div class='studio-section-sub'>Đã xong {done_count} · Chưa thu {todo_count} · Tổng {total}</div>"
+        "</div>"
+        f"<div class='studio-filters'>{filters_html}</div>"
+        "</div>"
+    )
+
+    # ----- Grid -----
+    visible = []
+    for idx, name in enumerate(all_dialogs):
+        is_done = name in done_set
+        if filt == "todo" and is_done:
+            continue
+        if filt == "done" and not is_done:
+            continue
+        visible.append((idx, name, is_done))
+
+    if not visible:
+        if total == 0:
+            grid = (
+                "<div style='padding:40px 22px;text-align:center;color:#8f8a7a;'>"
+                "Không tìm thấy hội thoại nào trong <code>input/</code>."
+                "</div>"
+            )
+        elif filt == "todo":
+            grid = (
+                "<div style='padding:40px 22px;text-align:center;color:#8f8a7a;'>"
+                "🎉 Bạn đã thu xong tất cả các hội thoại. Cảm ơn!"
+                "</div>"
+            )
+        else:
+            grid = "<div style='padding:40px 22px;text-align:center;color:#8f8a7a;'>Trống.</div>"
+    else:
+        cards = []
+        for idx, name, is_done in visible:
+            stem = Path(name).stem
+            try:
+                dt = datetime.strptime(name[:19], "%Y-%m-%dT%H-%M-%S")
+                date_label = dt.strftime("%d/%m · %H:%M")
+            except Exception:
+                date_label = name[:10]
+            num_turns = _count_turns(input_dir, name)
+            mins = _estimate_duration_min(num_turns)
+            badge = ("<span class='badge done'>ĐÃ XONG</span>"
+                     if is_done else "<span class='badge todo'>CHƯA THU</span>")
+            # partial[stem] is last_recorded_turn (0-indexed); approximate
+            # recorded count as (last_recorded_turn + 1) when present.
+            partial_count = (partial.get(stem, -1) + 1) if stem in partial else 0
+            recorded_str = f"· {partial_count} câu thu" if partial_count else ""
+            cls = "studio-card done" if is_done else "studio-card"
+            extra_meta = (f"<span>{recorded_str.lstrip('· ')}</span>"
+                          if recorded_str else "")
+            cards.append(
+                f"<div class='{cls}' data-card-dialog='{name}'>"
+                f"<div class='head'><span class='num'>Hội thoại #{idx+1}</span>"
+                f"{badge}<span class='date'>{date_label}</span></div>"
+                f"<div class='meta'><span>💬 {num_turns} câu</span>"
+                f"<span>⏱ ~{mins} phút</span>{extra_meta}</div>"
+                "</div>"
+            )
+        grid = f"<div class='studio-grid'>{''.join(cards)}</div>"
+
+    return top_bar + cta_html + section_head + grid
+
+
 # ---------- Load static assets ----------
 with open(os.path.join(_HERE, "studio.css"), encoding="utf-8") as _f:
     CSS = _f.read()
@@ -683,11 +826,22 @@ with gr.Blocks(
 
         if action == "set_name":
             collab = sanitize_collaborator_name(data.get("name", ""))
+        elif action == "set_filter":
+            new = data.get("filter")
+            if new in ("todo", "done", "all"):
+                filt = new
 
-        # No-op fallback: re-render whichever view is visible (Tasks 7+ fill in)
+        # Re-render whichever view is active
+        picker_update = (
+            gr.update(value=render_picker_html(
+                DEFAULT_INPUT_DIR, DEFAULT_OUTPUT_DIR, collab, filt
+            ))
+            if view == "picker" else gr.update()
+        )
+
         return (
             view, collab, filt, st,
-            gr.update(),  # picker_html
+            picker_update,
             gr.update(),  # recording_html
             gr.update(),  # mic_audio
             gr.update(visible=(view == "picker")),
@@ -705,12 +859,11 @@ with gr.Blocks(
         show_progress="hidden",
     )
 
-    # ───── Initial render — placeholder until Task 7 ─────
+    # ───── Initial render ─────
     def _initial_render():
-        return gr.update(
-            value="<div style='padding:40px;text-align:center;color:#8f8a7a;'>"
-                  "Đang tải… (Task 7 sẽ điền danh sách hội thoại)</div>"
-        )
+        return gr.update(value=render_picker_html(
+            DEFAULT_INPUT_DIR, DEFAULT_OUTPUT_DIR, "", "todo"
+        ))
     app.load(fn=_initial_render, inputs=None, outputs=[picker_html])
 
 
