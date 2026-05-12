@@ -73,3 +73,42 @@ def test_render_picker_resume_cta_when_partial_exists(picker_ctx):
                               picker_ctx["collab"], filt="todo")
     assert "data-resume-cta" in html
     assert "Thu tiếp" in html or "thu tiếp" in html
+
+
+def _fake_state(num_turns=6, current=4, recordings=None):
+    """Build a minimal state dict for render_recording_html tests."""
+    dialog = []
+    for i in range(num_turns):
+        role = "user" if i % 2 == 0 else "assistant"
+        dialog.append({"role": role, "text": f"Câu {i+1}", "text_raw": f"câu {i+1}"})
+    return {
+        "dialog": dialog,
+        "current_turn": current,
+        "recordings": recordings or {},
+        "dialog_name": "test.dialog",
+        "output_dir": "/tmp/test",
+        "user_audio_per_turn": {},
+    }
+
+
+def test_render_recording_shows_rail_with_count():
+    from app import render_recording_html
+    html = render_recording_html(_fake_state(current=4, recordings={1: "/p1.wav", 3: "/p3.wav"}), "Hieu")
+    assert "Bạn đã thu" in html
+    assert "data-play-user=" in html
+    assert "data-play-assistant=" in html
+
+
+def test_render_recording_marks_current_user_turn_playing():
+    from app import render_recording_html
+    # current=0 is a user turn (index 0 → role "user" by _fake_state's modulo logic)
+    html = render_recording_html(_fake_state(current=0), "Hieu")
+    # The current user turn should be rendered with the .playing class in the rail
+    # (or anywhere — we just want to confirm "playing" state shows up)
+    assert "rail-ctx playing" in html or "Đang phát" in html or "Khách đang nói" in html
+
+
+def test_render_recording_progress_text():
+    from app import render_recording_html
+    html = render_recording_html(_fake_state(num_turns=12, current=5), "Hieu")
+    assert "Câu 6 / 12" in html

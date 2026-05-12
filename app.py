@@ -635,8 +635,90 @@ def load_conversation_state(input_dir: str, dialog_name: str,
     }
 
 
+def _render_rail(st: dict) -> str:
+    dialog = st.get("dialog", [])
+    idx = st.get("current_turn", 0)
+    recordings = st.get("recordings", {})
+    # Count of recorded assistant turns
+    recorded_count = sum(1 for k in recordings.keys() if k < idx)
+    most_recent_rec = max(recordings.keys()) if recordings else None
+
+    rows = []
+    for i in range(min(idx, len(dialog))):
+        turn = dialog[i]
+        if turn["role"] == "user":
+            # Khách context row
+            rows.append(
+                f"<div class='rail-ctx' data-row-idx='{i}'>"
+                f"<span class='role'>Khách</span>"
+                f"<span class='num'>#{i+1}</span>"
+                f"<span class='text'>{turn['text']}</span>"
+                f"<button class='play-btn' data-play-user='{i}'>▶</button>"
+                "</div>"
+            )
+        else:
+            # Recorded assistant row (only if actually recorded)
+            if i in recordings:
+                rerec_btn = (
+                    "<button data-rerec>↻ Thu lại</button>"
+                    if i == most_recent_rec else ""
+                )
+                rows.append(
+                    f"<div class='rail-rec'>"
+                    f"<div class='top'><b>Đã thu</b><span>· Câu {i+1}</span></div>"
+                    f"<div class='text'>{turn['text']}</div>"
+                    f"<div class='actions'>"
+                    f"<button class='play' data-play-assistant='{i}'>▶ Phát lại</button>"
+                    f"{rerec_btn}"
+                    "</div></div>"
+                )
+
+    # If the current turn is a user turn, also show it in the rail
+    # as the "playing" row (so the rail mirrors the audio source).
+    if idx < len(dialog) and dialog[idx]["role"] == "user":
+        turn = dialog[idx]
+        rows.append(
+            f"<div class='rail-ctx playing' data-row-idx='{idx}'>"
+            f"<span class='role'>Khách</span>"
+            f"<span class='num'>#{idx+1}</span>"
+            f"<span class='text'>{turn['text']}</span>"
+            f"<button class='play-btn' data-play-user='{idx}'>⏸</button>"
+            "</div>"
+        )
+
+    return (
+        f"<div class='rail-head'><span class='count-pill'>{recorded_count}</span>"
+        f" Bạn đã thu</div>"
+        + "".join(rows)
+    )
+
+
+def _render_hero(st: dict) -> str:
+    """Minimal hero — Task 10 fills in all 4 states."""
+    dialog = st.get("dialog", [])
+    idx = st.get("current_turn", 0)
+    if not dialog or idx >= len(dialog):
+        return (
+            "<span class='hero-role-tag'>🎉 Hoàn thành</span>"
+            f"<div class='hero-turn-card'>Bạn đã thu xong {len(dialog)} câu.</div>"
+        )
+    turn = dialog[idx]
+    if turn["role"] == "user":
+        return (
+            "<span class='hero-role-tag'>Khách đang nói</span>"
+            f"<div class='hero-turn-card'>{turn['text']}</div>"
+            "<div class='hero-hint'>⏳ Tự sang câu kế khi nghe xong</div>"
+            "<button class='hero-btn skip' data-skip-user>Bỏ qua câu này →</button>"
+        )
+    return (
+        "<span class='hero-role-tag'>Đến lượt bạn</span>"
+        f"<div class='hero-turn-card'>{turn['text']}</div>"
+        "<button class='hero-rec-btn' data-rec-start><span class='inner'></span></button>"
+        "<div class='hero-hint'><b>Bấm để ghi âm</b> · hoặc <span class='hero-kbd'>Space</span></div>"
+    )
+
+
 def render_recording_html(st: dict, collab: str) -> str:
-    """Render the recording page. Stub for Task 8 — full version in Tasks 9-11."""
     if not st.get("dialog"):
         return "<div style='padding:40px;text-align:center;'>Đang tải hội thoại…</div>"
     dialog = st["dialog"]
@@ -661,21 +743,13 @@ def render_recording_html(st: dict, collab: str) -> str:
         f"<span class='pct'>{pct}%</span>"
         "</div>"
     )
-    if idx < total:
-        turn = dialog[idx]
-        body = (
-            f"<div style='padding:40px;text-align:center;'>"
-            f"<div style='font-size:11px;color:#8f8a7a;margin-bottom:8px;'>"
-            f"Câu hiện tại ({turn['role']})</div>"
-            f"<div style='font-size:18px;'>{turn['text']}</div>"
-            f"<div style='margin-top:14px;font-size:12px;color:#8f8a7a;'>"
-            f"(Tasks 9-11 sẽ điền nội dung đầy đủ — rail + hero + 4 trạng thái)</div>"
-            f"</div>"
-        )
-    else:
-        body = "<div style='padding:40px;text-align:center;'>Hoàn thành!</div>"
-
-    return top_bar + progress + body
+    shell = (
+        "<div class='studio-rec-shell'>"
+        f"<div class='studio-rec-rail'>{_render_rail(st)}</div>"
+        f"<div class='studio-rec-hero'>{_render_hero(st)}</div>"
+        "</div>"
+    )
+    return top_bar + progress + shell
 
 
 def _estimate_duration_min(num_turns: int) -> int:
