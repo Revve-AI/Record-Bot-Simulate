@@ -49,7 +49,9 @@ def test_sanitize_collaborator_name_strips_path_chars():
     assert sanitize_collaborator_name("Nguyễn / Văn ?A") == "Nguyễn _ Văn _A"
     assert sanitize_collaborator_name("  spaces   collapsed  ") == "spaces collapsed"
     assert sanitize_collaborator_name("") == ""
-    assert sanitize_collaborator_name("../escape") == "_/escape"
+    # "/" → "_" applies first (forward-slash is in the forbidden set),
+    # then ".." → "_" — so "../escape" becomes "__escape" (both replacements).
+    assert sanitize_collaborator_name("../escape") == "__escape"
 
 
 def test_session_output_dir_includes_collab_and_stem(tmp_path: Path):

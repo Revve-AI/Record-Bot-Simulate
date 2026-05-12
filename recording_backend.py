@@ -102,30 +102,12 @@ def list_dialogs(input_dir: str) -> list[str]:
 
 
 def sanitize_collaborator_name(name: str) -> str:
-    """Chuẩn hoá tên CTV để dùng làm tên thư mục (an toàn cross-platform).
-
-    Rules:
-    - Block path traversal: replace ``..`` with ``_``
-    - Replace Windows-forbidden chars (backslash, colon, asterisk, question
-      mark, double-quote, angle brackets, pipe) with ``_``
-    - Replace a forward-slash that is surrounded by spaces (used as a word
-      separator) with ``_``; a bare ``/`` path separator is preserved so that
-      ``../escape`` becomes ``_/escape`` (traversal blocked, separator kept)
-    - Collapse internal whitespace runs to a single space, then strip
-    """
+    """Chuẩn hoá tên CTV để dùng làm tên thư mục (an toàn cross-platform)."""
     name = (name or "").strip()
     if not name:
         return ""
-    # 1. Block path traversal first
+    name = re.sub(r"[/\\:*?\"<>|]", "_", name)
     name = name.replace("..", "_")
-    # 2. Replace Windows-forbidden chars (not forward-slash — handled below)
-    name = re.sub(r"[\\:*?\"<>|]", "_", name)
-    # 3. Replace slash that is surrounded by whitespace on at least one side
-    #    (used as a word separator, e.g. "A / B") → keep the spaces, replace
-    #    only the slash character.  A bare path-separator slash (no adjacent
-    #    whitespace, e.g. the / in "_/escape") is left untouched.
-    name = re.sub(r"(?<=\s)/|/(?=\s)", "_", name)
-    # 4. Collapse whitespace
     name = re.sub(r"\s+", " ", name).strip()
     return name
 
