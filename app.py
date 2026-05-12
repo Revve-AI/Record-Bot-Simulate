@@ -970,20 +970,23 @@ with gr.Blocks(
     state = gr.State({})
 
     # ───── Hidden orchestration components ─────
+    # NOTE: visible=True + CSS-hidden so the DOM elements stay reachable from
+    # studio.js via document.getElementById. Gradio drops the markup entirely
+    # when visible=False, which breaks click delegation.
     studio_action_payload = gr.Textbox(
-        visible=False,
         elem_id="studio-action-payload",
         elem_classes=["studio-hidden"],
+        show_label=False,
     )
     studio_action_trigger = gr.Button(
-        visible=False,
+        "trigger",
         elem_id="studio-action-trigger",
         elem_classes=["studio-hidden"],
     )
     studio_stored_name = gr.Textbox(
-        visible=False,
         elem_id="studio-stored-name",
         elem_classes=["studio-hidden"],
+        show_label=False,
     )
 
     # ───── Picker view (top-level Column) ─────
