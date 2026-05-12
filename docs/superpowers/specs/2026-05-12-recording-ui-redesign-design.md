@@ -351,21 +351,33 @@ What changes:
 
 ## 9. Implementation approach
 
-Three options, ordered from least to most work:
+**Stay on Gradio.** No stack changes, no architectural changes — same dependencies (`gradio`, `silero-vad`, `torch`, `numpy`, `soundfile`), same Dockerfile, same `python app.py` entrypoint, same port 7860, same docker-compose volumes.
 
-**Option A — Pure Gradio refactor.** Stay on Gradio, rebuild with custom HTML/CSS injected via `gr.HTML()`. **Not recommended** — Gradio fights us on every detail (event delegation, sticky layouts, custom state, no real router). The current `app.py` already has ~1000 lines of CSS hacks. We'd end up writing a SPA inside Gradio and the result will still feel like Gradio.
+Concrete shape:
 
-**Option B — FastAPI + vanilla SPA (recommended).** Pull `parse_dialog_file`, `segment_user_turns`, `trim_silences`, `action_recording_done`/`save`/`finish` out of `app.py` into `recording_backend.py`. Mount FastAPI in front. Build the frontend as a single static page with vanilla JS + a small router (or use HTMX/Alpine if preferred). One Docker container serves both. **No npm/build step required.** Total LoC change: ~600 lines added (frontend) + ~200 modified (backend extraction).
+- **Single `gr.Blocks`** page. Two views (picker, recording) modeled as two top-level `gr.Column` blocks with `visible=` toggled from a `gr.State` (`view: "picker" | "recording"`). No `gr.Tabs` — the user picks via a card click, not a tab click.
+- **All visuals via `gr.HTML()`** with a single CSS block at the top of the file declaring the design tokens (`--brand`, `--bg`, etc.) as CSS variables on `.gradio-container`. Existing inline `<style>` block in `app.py` gets replaced wholesale.
+- **`gr.Audio(sources=["microphone"], type="filepath")`** stays exactly as today — same `action_recording_done` handler reads the file and calls existing save logic. This component is the one place we can't fully restyle (Gradio internal), so we wrap it in a styled `gr.Column` and hide its default chrome with targeted CSS overrides where possible.
+- **Click handlers on dynamic HTML** (conversation cards on the picker, play buttons on rail items, etc.) use the existing pattern: render the HTML with `data-*` attributes, expose hidden `gr.Button`s named `_card_click`, `_play_user_audio`, etc., and use a `js=` snippet on `gr.Blocks.load` to delegate clicks to those hidden buttons via a JS event listener attached to `.gradio-container`. This is how `action_load`/`action_save_continue` etc. already get wired.
+- **Keyboard shortcuts** via a `gr.Blocks.load(js=...)` snippet that adds `keydown` listeners and dispatches clicks on hidden `gr.Button`s (`_kbd_space`, `_kbd_enter`, `_kbd_r`, `_kbd_skip`, `_kbd_back`).
+- **`localStorage` for collaborator name** via a `js=` snippet on `gr.Blocks.load` that reads `studio.collab_name` and dispatches an input event into the (hidden) `gr.Textbox` already used for the name. Writing happens via the same channel when the user edits.
+- **`progress.json`** is written synchronously inside `action_save_continue` (and `action_recording_done` if we want even finer granularity). Deleted at the start of `action_finish`.
 
-**Option C — FastAPI + React/Vite.** Same backend as B. Frontend uses React + Vite. More tooling, but easier to maintain as the UI grows. Requires npm in the Docker build.
+**Backend extraction:** `parse_dialog_file`, `segment_user_turns`, `trim_silences`, `audio_to_data_url`, `is_dialog_done` and the small file-IO helpers move into `recording_backend.py` to keep `app.py` focused on UI state and event handlers. No behavior changes — pure refactor for legibility.
 
-**Recommended: Option B.** Matches current deployment shape (one Python container), no JS toolchain, gives us the polish the design needs. The vanilla approach is realistic for ~600 lines of UI.
+**Files touched:**
+- `app.py` — rewritten UI section (Blocks, HTML, handlers); imports from `recording_backend`
+- `recording_backend.py` — new module, ~250 lines extracted verbatim from current `app.py`
+- `static/studio.css` (optional, served via Gradio's `allowed_paths`) — design tokens + layout CSS. Can also live inline at the top of `app.py` if we prefer one-file simplicity.
+- `static/studio.js` (optional) — click delegation + keyboard listeners + localStorage. Same one-file caveat.
+
+**Acknowledged trade-offs:** Gradio wraps every component in its own DOM, so a few details (audio component chrome, file upload progress) can't be made pixel-perfect. We get ~80% of the design quality at ~30% of the effort vs a FastAPI+SPA rewrite. Zero risk to deploy infra.
 
 ## 10. Open questions
 
 1. **Partial progress file** — confirmed in scope? (~10 LoC backend; needed for "thu tiếp" CTA and per-card "X câu thu"). If skipped, the picker drops the hero CTA and the per-card progress counter.
 
-2. **Frontend stack (Option B vs C)** — vanilla JS or React? Recommendation is vanilla unless the team plans to add a lot more UI later.
+2. ~~Frontend stack (Option B vs C)~~ — **Resolved:** stay on Gradio. No stack change.
 
 3. **Auth / multi-recorder isolation** — currently anyone with the URL types a name. Should the name be enforced (no recording until set)? Should we add a simple session cookie so different recorders on the same machine don't collide? Out of scope unless flagged.
 
