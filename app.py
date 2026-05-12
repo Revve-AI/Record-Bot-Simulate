@@ -605,6 +605,79 @@ def action_finish(state: dict):
 
 # ---------- Picker render helpers ----------
 
+def load_conversation_state(input_dir: str, dialog_name: str,
+                            output_dir: str, collab_name: str,
+                            resume_at: int | None = None) -> dict | None:
+    """Build the recording state dict for a conversation. Returns None on error.
+
+    `resume_at` — if given, skip to that turn (used by the resume CTA).
+    """
+    if not dialog_name:
+        return None
+    dialog_path = os.path.join(input_dir, dialog_name)
+    wav_path = dialog_path.replace(".dialog", ".wav")
+    dialog = parse_dialog_file(dialog_path)
+    if not dialog:
+        return None
+    user_audio_per_turn = segment_user_turns(wav_path, dialog)
+    session_dir = session_output_dir(output_dir, collab_name, dialog_name)
+    os.makedirs(session_dir, exist_ok=True)
+    return {
+        "collab_name": collab_name,
+        "dialog_name": dialog_name,
+        "dialog_path": dialog_path,
+        "wav_path": wav_path,
+        "output_dir": session_dir,
+        "dialog": dialog,
+        "user_audio_per_turn": user_audio_per_turn,
+        "recordings": {},
+        "current_turn": resume_at if resume_at is not None else 0,
+    }
+
+
+def render_recording_html(st: dict, collab: str) -> str:
+    """Render the recording page. Stub for Task 8 — full version in Tasks 9-11."""
+    if not st.get("dialog"):
+        return "<div style='padding:40px;text-align:center;'>Đang tải hội thoại…</div>"
+    dialog = st["dialog"]
+    idx = st.get("current_turn", 0)
+    total = len(dialog)
+    pct = int(idx / total * 100) if total else 0
+
+    top_bar = (
+        "<div class='studio-topbar'>"
+        "<div class='studio-logo'><span class='dot'></span>Studio</div>"
+        "<button class='studio-back-btn' data-back-to-picker>← Hội thoại khác</button>"
+        f"<span class='studio-conv-title'>"
+        f"{st['dialog_name'].replace('.dialog','')[:30]}</span>"
+        "<div class='studio-spacer'></div>"
+        f"<span class='studio-top-chip'>👤 <b>{collab or '—'}</b></span>"
+        "</div>"
+    )
+    progress = (
+        f"<div class='studio-rec-progress'>"
+        f"<span class='text'>Câu {min(idx+1, total)} / {total}</span>"
+        f"<div class='bar'><div class='fill' style='width:{pct}%'></div></div>"
+        f"<span class='pct'>{pct}%</span>"
+        "</div>"
+    )
+    if idx < total:
+        turn = dialog[idx]
+        body = (
+            f"<div style='padding:40px;text-align:center;'>"
+            f"<div style='font-size:11px;color:#8f8a7a;margin-bottom:8px;'>"
+            f"Câu hiện tại ({turn['role']})</div>"
+            f"<div style='font-size:18px;'>{turn['text']}</div>"
+            f"<div style='margin-top:14px;font-size:12px;color:#8f8a7a;'>"
+            f"(Tasks 9-11 sẽ điền nội dung đầy đủ — rail + hero + 4 trạng thái)</div>"
+            f"</div>"
+        )
+    else:
+        body = "<div style='padding:40px;text-align:center;'>Hoàn thành!</div>"
+
+    return top_bar + progress + body
+
+
 def _estimate_duration_min(num_turns: int) -> int:
     """Rough estimate — 25s per turn average."""
     return max(1, round(num_turns * 25 / 60))
@@ -830,6 +903,31 @@ with gr.Blocks(
             new = data.get("filter")
             if new in ("todo", "done", "all"):
                 filt = new
+        elif action == "open_conversation":
+            new_st = load_conversation_state(
+                DEFAULT_INPUT_DIR, data.get("dialog", ""),
+                DEFAULT_OUTPUT_DIR, collab,
+            )
+            if new_st and new_st.get("dialog"):
+                st = new_st
+                view = "recording"
+        elif action == "resume_next":
+            if collab:
+                from progress_tracking import suggest_next
+                all_d = list_dialogs(DEFAULT_INPUT_DIR)
+                s = suggest_next(DEFAULT_OUTPUT_DIR, collab, all_d)
+                if s:
+                    resume_at = (s["last_recorded_turn"] + 1) if s["kind"] == "resume" else 0
+                    new_st = load_conversation_state(
+                        DEFAULT_INPUT_DIR, s["dialog_name"],
+                        DEFAULT_OUTPUT_DIR, collab,
+                        resume_at=resume_at,
+                    )
+                    if new_st and new_st.get("dialog"):
+                        st = new_st
+                        view = "recording"
+        elif action == "back_to_picker":
+            view = "picker"
 
         # Re-render whichever view is active
         picker_update = (
@@ -838,11 +936,15 @@ with gr.Blocks(
             ))
             if view == "picker" else gr.update()
         )
+        recording_update = (
+            gr.update(value=render_recording_html(st, collab))
+            if view == "recording" else gr.update()
+        )
 
         return (
             view, collab, filt, st,
             picker_update,
-            gr.update(),  # recording_html
+            recording_update,
             gr.update(),  # mic_audio
             gr.update(visible=(view == "picker")),
             gr.update(visible=(view == "recording")),
