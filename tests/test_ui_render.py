@@ -94,7 +94,10 @@ def _fake_state(num_turns=6, current=4, recordings=None):
 def test_render_recording_shows_rail_with_count():
     from app import render_recording_html
     html = render_recording_html(_fake_state(current=4, recordings={1: "/p1.wav", 3: "/p3.wav"}), "Hieu")
-    assert "Bạn đã thu" in html
+    # The rail header changed to show the full conversation overview, not
+    # just recorded turns. Now shows "Hội thoại" with an N/total chip.
+    assert "Hội thoại" in html
+    assert "2/" in html  # 2 recorded out of N total turns
     assert "data-play-user=" in html
     assert "data-play-assistant=" in html
 

@@ -605,12 +605,33 @@ def action_finish(state: dict):
 
 # ---------- Picker render helpers ----------
 
+_TURN_FILE_RE = re.compile(r"^turn_(\d+)_assistant\.wav$")
+
+
+def _load_existing_recordings(session_dir: str) -> dict[int, str]:
+    """Scan the session dir for previously recorded turns.
+
+    gr.State lives in memory and is wiped on page refresh, so without this the
+    user appears to lose all their work. The .wav files are still on disk —
+    rebuild the recordings dict from them.
+    """
+    if not os.path.isdir(session_dir):
+        return {}
+    out: dict[int, str] = {}
+    for name in os.listdir(session_dir):
+        m = _TURN_FILE_RE.match(name)
+        if m:
+            out[int(m.group(1))] = os.path.realpath(os.path.join(session_dir, name))
+    return out
+
+
 def load_conversation_state(input_dir: str, dialog_name: str,
                             output_dir: str, collab_name: str,
                             resume_at: int | None = None) -> dict | None:
     """Build the recording state dict for a conversation. Returns None on error.
 
     `resume_at` — if given, skip to that turn (used by the resume CTA).
+    Otherwise auto-resume past any turns already recorded on disk.
     """
     if not dialog_name:
         return None
@@ -622,6 +643,15 @@ def load_conversation_state(input_dir: str, dialog_name: str,
     user_audio_per_turn = segment_user_turns(wav_path, dialog)
     session_dir = session_output_dir(output_dir, collab_name, dialog_name)
     os.makedirs(session_dir, exist_ok=True)
+
+    recordings = _load_existing_recordings(session_dir)
+    if resume_at is not None:
+        current_turn = resume_at
+    elif recordings:
+        current_turn = min(max(recordings.keys()) + 1, len(dialog))
+    else:
+        current_turn = 0
+
     return {
         "collab_name": collab_name,
         "dialog_name": dialog_name,
@@ -630,8 +660,8 @@ def load_conversation_state(input_dir: str, dialog_name: str,
         "output_dir": session_dir,
         "dialog": dialog,
         "user_audio_per_turn": user_audio_per_turn,
-        "recordings": {},
-        "current_turn": resume_at if resume_at is not None else 0,
+        "recordings": recordings,
+        "current_turn": current_turn,
         "rec_phase": "idle",
     }
 
@@ -640,57 +670,77 @@ def _render_rail(st: dict) -> str:
     dialog = st.get("dialog", [])
     idx = st.get("current_turn", 0)
     recordings = st.get("recordings", {})
-    # Count of recorded assistant turns
-    recorded_count = sum(1 for k in recordings.keys() if k < idx)
-    most_recent_rec = max(recordings.keys()) if recordings else None
+    recorded_count = len(recordings)
+    total = len(dialog)
 
     rows = []
-    for i in range(min(idx, len(dialog))):
-        turn = dialog[i]
-        if turn["role"] == "user":
-            # Khách context row
+    for i, turn in enumerate(dialog):
+        is_user = turn["role"] == "user"
+        is_current = i == idx
+        is_future = i > idx
+
+        if is_user:
+            classes = "rail-ctx"
+            if is_current:
+                classes += " current playing"
+            elif is_future:
+                classes += " future"
+            play_icon = "⏸" if is_current else "▶"
             rows.append(
-                f"<div class='rail-ctx' data-row-idx='{i}'>"
+                f"<div class='{classes}' data-row-idx='{i}'>"
                 f"<span class='role'>Khách</span>"
                 f"<span class='num'>#{i+1}</span>"
                 f"<span class='text'>{turn['text']}</span>"
-                f"<button class='play-btn' data-play-user='{i}'>▶</button>"
+                f"<button class='play-btn' data-play-user='{i}'>{play_icon}</button>"
                 "</div>"
             )
         else:
-            # Recorded assistant row (only if actually recorded)
+            # Assistant turn — three states: recorded / current / future
             if i in recordings:
-                rerec_btn = (
-                    "<button data-rerec>↻ Thu lại</button>"
-                    if i == most_recent_rec else ""
-                )
                 rows.append(
-                    f"<div class='rail-rec'>"
+                    f"<div class='rail-rec' data-row-idx='{i}'>"
                     f"<div class='top'><b>Đã thu</b><span>· Câu {i+1}</span></div>"
                     f"<div class='text'>{turn['text']}</div>"
                     f"<div class='actions'>"
                     f"<button class='play' data-play-assistant='{i}'>▶ Phát lại</button>"
-                    f"{rerec_btn}"
+                    f"<button data-rerec='{i}'>↻ Thu lại</button>"
+                    "</div></div>"
+                )
+            elif is_current:
+                rows.append(
+                    f"<div class='rail-rec current' data-row-idx='{i}'>"
+                    f"<div class='top'><b>Đang thu</b><span>· Câu {i+1}</span></div>"
+                    f"<div class='text'>{turn['text']}</div>"
+                    "</div>"
+                )
+            else:  # future assistant turn — clickable, jumps to that turn
+                rows.append(
+                    f"<div class='rail-rec future' data-row-idx='{i}' "
+                    f"data-jump-to='{i}' role='button' tabindex='0'>"
+                    f"<div class='top'><b>Chưa thu</b><span>· Câu {i+1}</span></div>"
+                    f"<div class='text'>{turn['text']}</div>"
+                    f"<div class='actions'>"
+                    f"<button data-jump-to='{i}'>→ Thu câu này</button>"
                     "</div></div>"
                 )
 
-    # If the current turn is a user turn, also show it in the rail
-    # as the "playing" row (so the rail mirrors the audio source).
-    if idx < len(dialog) and dialog[idx]["role"] == "user":
-        turn = dialog[idx]
-        rows.append(
-            f"<div class='rail-ctx playing' data-row-idx='{idx}'>"
-            f"<span class='role'>Khách</span>"
-            f"<span class='num'>#{idx+1}</span>"
-            f"<span class='text'>{turn['text']}</span>"
-            f"<button class='play-btn' data-play-user='{idx}'>⏸</button>"
-            "</div>"
-        )
-
+    # Auto-scroll the rail so the current turn is centred. Uses the same
+    # <img onerror> trick as play_tag: fires synchronously when the broken
+    # src 404s, and runs on every render (the rail HTML is regenerated when
+    # current_turn changes, so the <img> is fresh every time).
+    scroll_trigger = (
+        f"<img src='/studio-rail-scroll/{time.time_ns()}.gif' "
+        "style='display:none' "
+        "onerror=\""
+        "var el=document.querySelector('.studio-rec-rail .current');"
+        "if(el)el.scrollIntoView({block:'center',behavior:'smooth'});\">"
+    )
     return (
-        f"<div class='rail-head'><span class='count-pill'>{recorded_count}</span>"
-        f" Bạn đã thu</div>"
+        f"<div class='rail-head'>"
+        f"<span class='count-pill'>{recorded_count}/{total}</span>"
+        f" Hội thoại</div>"
         + "".join(rows)
+        + scroll_trigger
     )
 
 
@@ -772,6 +822,8 @@ def render_recording_html(st: dict, collab: str) -> str:
         "<div class='studio-topbar'>"
         "<div class='studio-logo'><span class='dot'></span>Studio</div>"
         "<button class='studio-back-btn' data-back-to-picker>← Hội thoại khác</button>"
+        "<button class='studio-back-btn studio-listen-all' data-play-all>"
+        "▶ Nghe toàn bộ</button>"
         f"<span class='studio-conv-title'>"
         f"{st['dialog_name'].replace('.dialog','')[:30]}</span>"
         "<div class='studio-spacer'></div>"
@@ -802,9 +854,53 @@ def render_recording_html(st: dict, collab: str) -> str:
         else:
             url = audio_to_data_url(st.get("recordings", {}).get(ridx))
         if url:
-            play_tag = f"<audio autoplay src='{url}' style='display:none'></audio>"
+            # Unique id + <img onerror> trick to force a fresh play every
+            # click. data-nonce on <audio autoplay> alone doesn't work because
+            # Svelte's morphdom reuses the existing element when only an
+            # attribute differs, so autoplay only fires on initial mount.
+            # Giving the audio a unique id forces a real re-mount, and the
+            # <img onerror> handler fires synchronously when its broken src
+            # is parsed — guaranteeing .play() runs on each render.
+            play_id = f"studio-play-{time.time_ns()}"
+            play_tag = (
+                f"<audio id='{play_id}' src='{url}' style='display:none'></audio>"
+                f"<img src='/studio-play-trigger/{play_id}.gif' "
+                f"style='display:none' "
+                f"onerror=\"var a=document.getElementById('{play_id}');"
+                f"if(a){{a.currentTime=0;a.play();}}\">"
+            )
 
-    return top_bar + progress + shell + play_tag
+    # Whole-conversation playback: when "Nghe toàn bộ" is clicked, build a
+    # JSON list of {idx, url} for every turn that has audio, base64-encode it,
+    # and ship a one-shot <img onerror> trigger that hands it to
+    # window.studioStartPlaylist for client-side sequential playback. After
+    # the trigger fires once we drop the marker from state.
+    playlist_tag = ""
+    if st.pop("_playlist_request", False):
+        items = []
+        for i, turn in enumerate(dialog):
+            if turn["role"] == "user":
+                src = get_trimmed_user_audio(st, i)
+            else:
+                src = st.get("recordings", {}).get(i)
+            url = audio_to_data_url(src)
+            if url:
+                items.append({"idx": i, "url": url})
+        if items:
+            payload_b64 = _base64.b64encode(
+                json.dumps(items).encode("utf-8")
+            ).decode()
+            trigger_id = f"studio-playlist-{time.time_ns()}"
+            playlist_tag = (
+                f"<img id='{trigger_id}' "
+                f"src='/studio-playlist-trigger/{trigger_id}.gif' "
+                "style='display:none' "
+                f"data-playlist='{payload_b64}' "
+                "onerror=\"window.studioStartPlaylist && "
+                "window.studioStartPlaylist(this.dataset.playlist)\">"
+            )
+
+    return top_bar + progress + shell + play_tag + playlist_tag
 
 
 def _estimate_duration_min(num_turns: int) -> int:
@@ -991,7 +1087,7 @@ with gr.Blocks(
         )
 
     # ───── Recording view (hidden until user picks) ─────
-    with gr.Column(visible=False) as recording_view:
+    with gr.Column(visible=False, elem_classes=["studio-recording"]) as recording_view:
         recording_html = gr.HTML("")
         # The mic Audio component — kept as the only "real" Gradio input.
         # CSS minimises its chrome; clicks come from the rendered HTML.
@@ -1006,6 +1102,28 @@ with gr.Blocks(
             buttons=[],
             waveform_options={"show_recording_waveform": False},
         )
+
+    def _skip_recorded_assistant(st: dict) -> dict:
+        """Skip past assistant turns that already have a recording.
+
+        After re-recording an earlier turn and advancing forward, the user can
+        otherwise get parked on a turn they've already recorded (e.g. recorded
+        turns 1+3, came back to redo 1, after saving the next assistant turn
+        is 3 — but they don't want to redo 3). Walk forward until we hit an
+        un-recorded assistant turn, a user turn (always re-playable), or the
+        end of the dialog.
+        """
+        dialog = st.get("dialog", [])
+        recordings = st.get("recordings", {})
+        idx = st.get("current_turn", 0)
+        while idx < len(dialog):
+            turn = dialog[idx]
+            if turn["role"] == "assistant" and idx in recordings:
+                idx += 1
+            else:
+                break
+        st["current_turn"] = idx
+        return st
 
     # ───── Dispatcher (single Python entry point for all dynamic JS actions) ─────
     def studio_dispatch(payload_json: str, view: str, collab: str, filt: str, st: dict):
@@ -1059,22 +1177,46 @@ with gr.Blocks(
             st = dict(st or {})
             st["current_turn"] = st.get("current_turn", 0) + 1
             st["rec_phase"] = "idle"
+            st = _skip_recorded_assistant(st)
+        elif action == "jump_to":
+            # User clicked a "Chưa thu" row in the rail — go straight to that
+            # turn. Honest jump: no skipping, no auto-advance. Works for any
+            # idx in range (assistant or user), so it could be reused later
+            # for arbitrary navigation.
+            target = data.get("idx")
+            if target is not None and st and st.get("dialog"):
+                idx2 = max(0, min(int(target), len(st["dialog"]) - 1))
+                st = dict(st)
+                st["current_turn"] = idx2
+                st["rec_phase"] = "idle"
         elif action == "rerecord_last":
             st = dict(st or {})
-            idx2 = st.get("current_turn", 0)
+            # Rail's "Thu lại" passes data.idx (most-recent-recorded turn);
+            # hero's "Thu lại" in preview phase passes no idx (means "redo
+            # the take I just made", i.e. current_turn).
+            target = data.get("idx")
+            idx2 = int(target) if target is not None else st.get("current_turn", 0)
             recs = dict(st.get("recordings", {}))
             recs.pop(idx2, None)
             st["recordings"] = recs
+            st["current_turn"] = idx2  # jump back so hero shows that turn
             st["rec_phase"] = "idle"
         elif action == "skip_user":
             st = dict(st or {})
             st["current_turn"] = st.get("current_turn", 0) + 1
+            st = _skip_recorded_assistant(st)
         elif action == "play_user_audio":
             st = dict(st or {})
             st["_play_request"] = ("user", int(data.get("idx", 0)))
         elif action == "play_assistant_audio":
             st = dict(st or {})
             st["_play_request"] = ("assistant", int(data.get("idx", 0)))
+        elif action == "play_all":
+            # Mark state so render_recording_html can build the full playlist
+            # of data-URLs and inject a one-shot JS trigger to play them in
+            # sequence client-side.
+            st = dict(st or {})
+            st["_playlist_request"] = True
         elif action == "finish":
             try:
                 action_finish(st)
@@ -1088,6 +1230,7 @@ with gr.Blocks(
                 st = dict(st)
                 st["current_turn"] = st.get("current_turn", 0) + 1
                 st["rec_phase"] = "idle"
+                st = _skip_recorded_assistant(st)
         elif action == "kbd_rerec":
             # Re-record current turn, only valid in preview phase
             if st.get("rec_phase") == "preview":
@@ -1104,6 +1247,7 @@ with gr.Blocks(
                 if idx2 < len(st["dialog"]) and st["dialog"][idx2]["role"] == "user":
                     st = dict(st)
                     st["current_turn"] = idx2 + 1
+                    st = _skip_recorded_assistant(st)
         elif action == "kbd_back":
             view = "picker"
         elif action == "kbd_space":
@@ -1124,11 +1268,26 @@ with gr.Blocks(
             if view == "recording" else gr.update()
         )
 
+        # Reset mic_audio whenever the turn changes (so the previous take
+        # is cleared from the component and the record button reappears).
+        # Don't reset on view-switching actions (open_conversation,
+        # resume_next, back_to_picker, finish) — those mount/unmount the
+        # recording view, so the component is already in its fresh state and
+        # an extra value=None update can leave it in a transient state where
+        # the record-button briefly isn't in the DOM.
+        mic_reset_actions = {
+            "save_and_next", "rerecord_last", "skip_user", "jump_to",
+            "kbd_enter", "kbd_rerec", "kbd_skip",
+        }
+        mic_update = (
+            gr.update(value=None) if action in mic_reset_actions else gr.update()
+        )
+
         return (
             view, collab, filt, st,
             picker_update,
             recording_update,
-            gr.update(),  # mic_audio
+            mic_update,
             gr.update(visible=(view == "picker")),
             gr.update(visible=(view == "recording")),
         )
