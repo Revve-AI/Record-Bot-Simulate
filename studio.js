@@ -141,7 +141,14 @@
       switch (e.key) {
         case " ":
           e.preventDefault();
-          dispatchAction("kbd_space", {});
+          // Context-sensitive: stop > start > play. Click whichever is visible.
+          const stopBtn = document.querySelector("[data-rec-stop]");
+          const recBtn = document.querySelector("[data-rec-start]");
+          const playUser = document.querySelector(".hero-audio-bar.user .play-circle");
+          if (stopBtn) { stopBtn.click(); }
+          else if (recBtn) { recBtn.click(); }
+          else if (playUser) { playUser.click(); }
+          // else: nothing visible to act on — swallow Space silently
           break;
         case "Enter":
           dispatchAction("kbd_enter", {});

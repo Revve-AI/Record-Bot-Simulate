@@ -1084,6 +1084,35 @@ with gr.Blocks(
                 print(f"[finish] {exc}")
             view = "picker"
             st = {}
+        elif action == "kbd_enter":
+            # Save & next, only valid in preview phase
+            if st.get("rec_phase") == "preview":
+                st = dict(st)
+                st["current_turn"] = st.get("current_turn", 0) + 1
+                st["rec_phase"] = "idle"
+        elif action == "kbd_rerec":
+            # Re-record current turn, only valid in preview phase
+            if st.get("rec_phase") == "preview":
+                st = dict(st)
+                idx2 = st.get("current_turn", 0)
+                recs = dict(st.get("recordings", {}))
+                recs.pop(idx2, None)
+                st["recordings"] = recs
+                st["rec_phase"] = "idle"
+        elif action == "kbd_skip":
+            # Skip the current user turn (no-op on assistant turns)
+            if st and st.get("dialog"):
+                idx2 = st.get("current_turn", 0)
+                if idx2 < len(st["dialog"]) and st["dialog"][idx2]["role"] == "user":
+                    st = dict(st)
+                    st["current_turn"] = idx2 + 1
+        elif action == "kbd_back":
+            view = "picker"
+        elif action == "kbd_space":
+            # Space is context-sensitive — handled client-side in studio.js
+            # by clicking the right visible button. No Python action needed;
+            # this branch exists just to swallow the action.
+            pass
 
         # Re-render whichever view is active
         picker_update = (
