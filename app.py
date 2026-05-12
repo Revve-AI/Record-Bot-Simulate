@@ -10,9 +10,10 @@ silero-vad chỉ dùng cho 2 việc:
 """
 from __future__ import annotations
 
-import base64
+import base64 as _base64
 import io
 import json
+import urllib.parse
 import os
 import random
 import re
@@ -344,28 +345,44 @@ def get_trimmed_user_audio(state: dict, idx: int):
     return cache[idx]
 
 
+# Thư mục lưu user audio tạm để serve qua HTTP.
+# Đặt cạnh output/ (cùng thư mục app) thay vì /tmp — vì /tmp trên macOS là
+# /var/folders/.../T/ có symlink /var → /private/var khiến Gradio `abs_path.exists()`
+# có thể lệch giữa allowed_paths và real path.
+_HERE = os.path.dirname(os.path.abspath(__file__))
+USER_AUDIO_TMPDIR = os.path.realpath(os.path.join(_HERE, "output", ".user_audio_cache"))
+os.makedirs(USER_AUDIO_TMPDIR, exist_ok=True)
+
+
 def audio_to_data_url(audio_or_path) -> str | None:
-    """Encode audio (tuple hoặc filepath) thành data URL để nhúng vào HTML."""
+    """Encode audio thành base64 data URL — luôn hoạt động không phụ thuộc
+    Gradio file endpoint (flaky với absolute paths trong vài version).
+    Để tránh phình HTML, chỉ encode N turn gần nhất (_MAX_EMBED_PAST).
+    """
     if audio_or_path is None:
         return None
     try:
-        if isinstance(audio_or_path, tuple):
-            sr, arr = audio_or_path
-            buf = io.BytesIO()
-            sf.write(buf, arr, sr, format="WAV")
-            data = buf.getvalue()
-        elif isinstance(audio_or_path, str) and os.path.exists(audio_or_path):
+        if isinstance(audio_or_path, str):
+            if not os.path.exists(audio_or_path):
+                return None
             with open(audio_or_path, "rb") as f:
                 data = f.read()
+        elif isinstance(audio_or_path, tuple):
+            sr, arr = audio_or_path
+            arr = np.asarray(arr)
+            buf = io.BytesIO()
+            arr_int16 = np.clip(arr * 32767.0, -32768, 32767).astype(np.int16)
+            sf.write(buf, arr_int16, sr, format="WAV")
+            data = buf.getvalue()
         else:
             return None
-        return "data:audio/wav;base64," + base64.b64encode(data).decode()
+        return "data:audio/wav;base64," + _base64.b64encode(data).decode()
     except Exception as exc:
         print(f"[audio_to_data_url] {exc}")
         return None
 
 
-_MAX_EMBED_PAST = 6  # chỉ nhúng audio cho 6 turn quá khứ gần nhất → chat HTML không phình
+_MAX_EMBED_PAST = 4  # chỉ nhúng audio cho 4 turn quá khứ gần nhất (base64)
 
 
 def _bubble_html(state: dict, i: int, role_state: str) -> str:
@@ -656,64 +673,71 @@ def action_next(state: dict):
 def action_recording_done(state: dict, mic_value):
     """gr.Audio.stop_recording event — chạy khi CTV bấm dừng trong component mic.
 
-    `mic_value` là tuple (sample_rate, np.ndarray) từ micro client browser.
+    `mic_value` là filepath (str) tới file .wav tạm do Gradio tạo từ recording.
     Pipeline:
-      1) ép mono float32, normalize biên độ
-      2) trim silence dài (silero-vad)
-      3) Lưu .wav  + show preview audio + Lưu/Ghi lại
+      1) Đọc file, ép mono, downsample về 16kHz cho gọn nhẹ
+      2) Lưu vào output dir
+      3) Show preview audio + Lưu/Ghi lại
     """
     if mic_value is None:
-        # Người dùng huỷ ghi âm hay chưa thực hiện gì
+        return tuple([state] + [gr.update() for _ in range(13)])
+
+    # mic_value giờ là filepath string (type="filepath")
+    if not isinstance(mic_value, str) or not os.path.exists(mic_value):
+        print(f"[recording_done] unexpected mic value: {type(mic_value)} {mic_value!r}")
         return tuple([state] + [gr.update() for _ in range(13)])
 
     try:
-        sr, audio = mic_value
-    except Exception:
-        print(f"[recording_done] unexpected mic value: {type(mic_value)}")
+        audio, sr = sf.read(mic_value, dtype="float32")
+    except Exception as exc:
+        print(f"[recording_done] sf.read lỗi: {exc}")
         return tuple([state] + [gr.update() for _ in range(13)])
 
-    audio = np.asarray(audio)
     if audio.ndim > 1:
         audio = audio.mean(axis=1)
     audio = audio.astype(np.float32)
-    # Bình thường hoá nếu Gradio trả int16
-    if np.issubdtype(audio.dtype, np.integer) or np.abs(audio).max() > 1.5:
-        audio = audio / 32768.0
     audio = np.clip(audio, -1.0, 1.0)
 
     # Bỏ trường hợp ghi quá ngắn (< 0.3s)
     if len(audio) < int(0.3 * sr):
         return (
             state,
-            gr.update(), gr.update(), gr.update(),  # 1-3
-            gr.update(visible=False),               # 4 user_panel
-            gr.update(),                            # 5 user_audio
-            gr.update(visible=True, value=None),    # 6 mic_audio (reset)
-            gr.update(visible=True),                # 7 recording_panel
+            gr.update(), gr.update(), gr.update(),
+            gr.update(visible=False),
+            gr.update(),
+            gr.update(visible=True, value=None),
+            gr.update(visible=True),
             gr.update(value=(
                 "<div style='padding:14px;border-radius:8px;background:#FEF3C7;"
                 "color:#92400E;font-weight:600;'>"
                 "⚠️ Bản ghi quá ngắn (&lt; 0.3s). Hãy thử ghi lại."
                 "</div>"
-            )),                                     # 8 rec_status
-            gr.update(value=None),                  # 9 rec_audio
-            gr.update(), gr.update(), gr.update(),  # 10-12
-            gr.update(visible=False),               # 13 stop_record_btn
+            )),
+            gr.update(value=None),
+            gr.update(), gr.update(), gr.update(),
+            gr.update(visible=False),
         )
 
-    # KHÔNG trim silence cho bản ghi CTV — giữ nguyên giọng tự nhiên kể cả
-    # khoảng nghỉ. (trim_silences chỉ áp dụng cho turn user trong segment_user_turns)
-    audio_clean = audio
+    # Lưu int16 → file nhỏ gọn, không mất chất lượng speech
+    audio_int16 = np.clip(audio * 32767.0, -32768, 32767).astype(np.int16)
 
     idx = state["current_turn"]
     out_dir = state["output_dir"]
     os.makedirs(out_dir, exist_ok=True)
-    final_path = os.path.abspath(
+    # realpath để khớp với allowed_paths (tránh /var vs /private/var trên macOS)
+    final_path = os.path.realpath(
         os.path.join(out_dir, f"turn_{idx:02d}_assistant.wav")
     )
-    sf.write(final_path, audio_clean, sr)
+    sf.write(final_path, audio_int16, sr)
     state["recordings"][idx] = final_path
     state.get("_audio_url_cache", {}).pop(("a", idx), None)
+    print(f"[recording_done] saved {final_path}  ({len(audio)/sr:.1f}s @ {sr}Hz)")
+
+    # Base64 audio cho preview ngay trên rec_status — không cần file route
+    # của Gradio (đang flaky với absolute paths). 1-2s audio chỉ ~100KB.
+    with open(final_path, "rb") as _f:
+        _audio_b64 = _base64.b64encode(_f.read()).decode()
+    _audio_data_url = f"data:audio/wav;base64,{_audio_b64}"
 
     return (
         state,
@@ -729,8 +753,10 @@ def action_recording_done(state: dict, mic_value):
             "color:#065F46;font-weight:600;font-size:16px;'>"
             "✅ Đã ghi xong. Nghe lại bên dưới rồi xác nhận."
             "</div>"
+            f"<audio controls preload='auto' src='{_audio_data_url}' "
+            f"style='width:100%;margin-top:10px;border-radius:8px;'></audio>"
         )),                                         # 8 rec_status
-        gr.update(value=(sr, audio_clean), autoplay=False),  # 9 rec_audio
+        gr.update(value=None),                      # 9 rec_audio (ẩn / bỏ)
         gr.update(),                                # 10 future
         gr.update(),                                # 11 done_panel
         gr.update(),                                # 12 finish_msg
@@ -1542,12 +1568,14 @@ with gr.Blocks(
                 # KHÔNG bật show_recording_waveform vì canvas rendering có thể gây lag.
                 mic_audio = gr.Audio(
                     sources=["microphone"],
-                    type="numpy",
+                    type="filepath",  # Gradio save trực tiếp ra temp file
+                                       # → nhanh hơn việc convert sang numpy
                     label="🎤 Bấm nút mic để ghi âm",
                     interactive=True,
                     elem_id="mic-audio",
                     elem_classes=["mic-audio"],
                     visible=True,
+                    format="wav",
                 )
 
                 # Nút lớn "Kết thúc" hiện sau khi CTV bắt đầu ghi —
@@ -1561,10 +1589,15 @@ with gr.Blocks(
                 )
 
                 with gr.Column(visible=True, elem_classes=["recording-row"]) as recording_panel:
+                    # rec_status nhận HTML có sẵn <audio> tag bên trong
+                    # → không cần thêm gr.Audio component nữa
                     rec_status = gr.HTML()
+                    # rec_audio giữ lại để tương thích outputs cũ (luôn ẩn)
                     rec_audio = gr.Audio(
                         label="🎧 Nghe lại bản ghi của bạn",
                         interactive=False,
+                        type="filepath",
+                        visible=False,
                     )
                     with gr.Row():
                         rerec_btn = gr.Button(
@@ -1729,16 +1762,23 @@ with gr.Blocks(
         fn=action_load,
         inputs=[input_dir, dialog_dropdown, output_dir, collab_state],
         outputs=main_outputs,
+        show_progress="hidden",
     ).then(fn=None, js=SCROLL_TO_CURRENT_JS)
     next_btn.click(
-        fn=action_next, inputs=[state], outputs=main_outputs
+        fn=action_next, inputs=[state], outputs=main_outputs,
+        show_progress="hidden",
     ).then(fn=None, js=SCROLL_TO_CURRENT_JS)
     user_audio.stop(
-        fn=action_next, inputs=[state], outputs=main_outputs
+        fn=action_next, inputs=[state], outputs=main_outputs,
+        show_progress="hidden",
     ).then(fn=None, js=SCROLL_TO_CURRENT_JS)
     # Khi CTV bắt đầu ghi → hiện nút "Kết thúc ghi âm" lớn
+    def _on_mic_start():
+        print("[mic] start_recording event fired")
+        return gr.update(visible=True)
+
     mic_audio.start_recording(
-        fn=lambda: gr.update(visible=True),
+        fn=_on_mic_start,
         outputs=[stop_record_btn],
     )
 
@@ -1766,17 +1806,25 @@ with gr.Blocks(
     stop_record_btn.click(fn=None, js=STOP_RECORDING_JS)
 
     # CTV bấm dừng (qua nút lớn hoặc nút built-in) → xử lý audio đã ghi
+    # show_progress="hidden" → tắt overlay "processing" trên rec_status
+    # (overlay đôi khi không clear gây UX rối; xử lý server-side đã rất nhanh)
     mic_audio.stop_recording(
         fn=action_recording_done,
         inputs=[state, mic_audio],
         outputs=main_outputs,
+        show_progress="hidden",
     )
-    rerec_btn.click(fn=action_rerecord, inputs=[state], outputs=main_outputs)
+    rerec_btn.click(
+        fn=action_rerecord, inputs=[state], outputs=main_outputs,
+        show_progress="hidden",
+    )
     save_btn.click(
-        fn=action_save_continue, inputs=[state], outputs=main_outputs
+        fn=action_save_continue, inputs=[state], outputs=main_outputs,
+        show_progress="hidden",
     ).then(fn=None, js=SCROLL_TO_CURRENT_JS)
     finish_btn.click(
-        fn=action_finish, inputs=[state], outputs=[finish_msg]
+        fn=action_finish, inputs=[state], outputs=[finish_msg],
+        show_progress="hidden",
     ).then(
         fn=_refresh,
         inputs=[input_dir, output_dir, hide_done_chk, collab_state],
@@ -1792,9 +1840,19 @@ if __name__ == "__main__":
     # SHARE=1 (mặc định) → tạo public link gradio.live cho CTV truy cập từ xa.
     # Đặt SHARE=0 nếu chỉ chạy local.
     share = os.environ.get("SHARE", "1") != "0"
+    # Cho phép Gradio serve các file .wav từ thư mục output/input để
+    # rec_audio component (truyền filepath) load được qua HTTP.
+    here = os.path.dirname(os.path.abspath(__file__))
     app.queue().launch(
         server_name="0.0.0.0",
         server_port=int(os.environ.get("PORT", 7860)),
         share=share,
         show_error=True,
+        allowed_paths=[
+            os.path.realpath(os.path.join(here, "output")),
+            os.path.realpath(os.path.join(here, "input")),
+            os.path.realpath(DEFAULT_OUTPUT_DIR),
+            os.path.realpath(DEFAULT_INPUT_DIR),
+            USER_AUDIO_TMPDIR,
+        ],
     )
