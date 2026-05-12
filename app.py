@@ -978,11 +978,6 @@ with gr.Blocks(
         elem_classes=["studio-hidden"],
         show_label=False,
     )
-    studio_action_trigger = gr.Button(
-        "trigger",
-        elem_id="studio-action-trigger",
-        elem_classes=["studio-hidden"],
-    )
     studio_stored_name = gr.Textbox(
         elem_id="studio-stored-name",
         elem_classes=["studio-hidden"],
@@ -1138,7 +1133,11 @@ with gr.Blocks(
             gr.update(visible=(view == "recording")),
         )
 
-    studio_action_trigger.click(
+    # Fire dispatcher on textbox change — every dispatchAction() write to
+    # studio-action-payload includes a fresh nonce so the value always changes.
+    # This is more reliable than clicking a hidden button (Gradio's button
+    # markup can lose its elem_id in some 6.x renderings).
+    studio_action_payload.change(
         fn=studio_dispatch,
         inputs=[studio_action_payload, view_state, collab_state, filter_state, state],
         outputs=[

@@ -68,24 +68,20 @@
   }
 
   function dispatchAction(action, data) {
-    const payload = JSON.stringify({ action, data: data || {} });
-    console.log("[studio.js] dispatch", action, data);
-    const set = setHiddenTextbox("studio-action-payload", payload);
-    console.log("[studio.js] setHiddenTextbox →", set);
-    if (!set) return;
-    setTimeout(() => {
-      const root = document.getElementById("studio-action-trigger");
-      const btn = root && root.querySelector("button");
-      console.log("[studio.js] trigger btn:", btn);
-      if (btn) btn.click();
-    }, 30);
+    // Include a nonce so consecutive identical actions still trigger
+    // gr.Textbox.change (which only fires on a real value change).
+    const payload = JSON.stringify({
+      action,
+      data: data || {},
+      nonce: Date.now() + ":" + Math.random(),
+    });
+    setHiddenTextbox("studio-action-payload", payload);
   }
 
   // ----- click delegation -----
   function installClickDelegate() {
     document.addEventListener("click", (e) => {
       const card = e.target.closest("[data-card-dialog]");
-      console.log("[studio.js] click", e.target.tagName, "card?", !!card);
       if (card) {
         dispatchAction("open_conversation", { dialog: card.dataset.cardDialog });
         return;
