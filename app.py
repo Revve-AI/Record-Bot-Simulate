@@ -471,6 +471,16 @@ def action_recording_done(state: dict, mic_value):
     )
     sf.write(final_path, audio_int16, sr)
     state["recordings"][idx] = final_path
+    # Persist partial progress so the picker can show "thu tiếp"
+    try:
+        from progress_tracking import write_progress
+        write_progress(
+            state["output_dir"],
+            last_recorded_turn=idx,
+            recorded_count=len(state.get("recordings", {})),
+        )
+    except Exception as exc:
+        print(f"[progress] write failed: {exc}")
     state.get("_audio_url_cache", {}).pop(("a", idx), None)
     print(f"[recording_done] saved {final_path}  ({len(audio)/sr:.1f}s @ {sr}Hz)")
 
@@ -574,6 +584,13 @@ def action_finish(state: dict):
     }
     with open(os.path.join(out_dir, "dialog.json"), "w", encoding="utf-8") as f:
         json.dump(meta, f, ensure_ascii=False, indent=2)
+
+    # Conversation fully done — drop partial-progress file.
+    try:
+        from progress_tracking import clear_progress
+        clear_progress(out_dir)
+    except Exception as exc:
+        print(f"[progress] clear failed: {exc}")
 
     return gr.update(
         visible=True,
