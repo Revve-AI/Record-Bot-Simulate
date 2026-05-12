@@ -1,0 +1,708 @@
+/* ============================================================
+   Studio — design tokens
+   Brand: Carrot orange #e2731f. One color drives primary actions,
+   progress bar, and the record button. Neutrals are warm.
+   ============================================================ */
+:root {
+  --brand: #e2731f;
+  --brand-hover: #c25f15;
+  --brand-deep: #7a3d0c;
+  --brand-soft: #fbeedc;
+  --bg: #faf8f3;
+  --bg-2: #f3efe5;
+  --surface: #ffffff;
+  --surface-2: #f3efe5;
+  --border: #e7e0cf;
+  --border-strong: #d4cab4;
+  --text: #1f1d18;
+  --text-2: #5a574a;
+  --text-3: #8f8a7a;
+  --success: #5a8c5a;
+
+  --radius-chip: 4px;
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+  --radius-pill: 999px;
+
+  --shadow-card: 0 1px 0 rgba(0,0,0,.02);
+  --shadow-rec: 0 8px 24px -6px rgba(226,115,31,.45);
+}
+
+/* Override Gradio container — full viewport, no max-width */
+.gradio-container {
+  max-width: 100% !important;
+  padding: 0 !important;
+  background: var(--bg) !important;
+  color: var(--text) !important;
+  font-family: "Inter", ui-sans-serif, system-ui, -apple-system, sans-serif !important;
+  height: 100vh !important;
+  overflow: hidden !important;
+}
+
+/* Hide Gradio footer that says "Use via API" / version banner */
+footer { display: none !important; }
+
+/* Picker scrolls inside its own panel — page doesn't scroll. */
+.studio-picker {
+  height: 100vh;
+  overflow-y: auto;
+}
+
+/* Recording view is fully viewport-locked: topbar + progress + shell fit
+   into 100vh exactly. Only the rail (and hero, if its content overflows)
+   may scroll.
+   --rec-chrome-h = approx height of .studio-topbar + .studio-rec-progress
+   (topbar: 14+14 padding + ~24 content + 1 border ≈ 53px;
+    progress: 11+11 padding + ~22 content + 1 border ≈ 45px).
+   Bumped slightly for browser line-height variance. */
+:root { --rec-chrome-h: 102px; }
+.studio-recording {
+  height: 100vh;
+  overflow: hidden;
+}
+
+/* ============================================================
+   Top bar (shared by picker + recording)
+   ============================================================ */
+.studio-topbar {
+  padding: 14px 22px;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+}
+.studio-logo {
+  font-weight: 700;
+  font-size: 15px;
+  letter-spacing: -0.02em;
+  font-family: "Tiempos", "Charter", Georgia, serif;
+}
+.studio-logo .dot {
+  display: inline-block;
+  width: 8px; height: 8px;
+  background: var(--brand);
+  border-radius: 50%;
+  margin-right: 8px;
+  vertical-align: 2px;
+}
+.studio-back-btn {
+  padding: 6px 12px;
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  font-size: 12px;
+  color: var(--text-2);
+  cursor: pointer;
+  font-weight: 500;
+}
+/* "Nghe toàn bộ" sits in the topbar; emphasised slightly so it doesn't
+   blend with the back button. */
+.studio-listen-all { color: var(--brand) !important; }
+
+/* Whole-conversation playback highlight — every rail row is identified
+   by data-row-idx, JS adds .playing-now to the active one. */
+.studio-rec-rail .playing-now {
+  animation: playing-pulse 1.4s ease-in-out infinite;
+  border-color: var(--brand) !important;
+  box-shadow: 0 0 0 3px var(--brand-soft) !important;
+}
+@keyframes playing-pulse {
+  0%, 100% { box-shadow: 0 0 0 3px var(--brand-soft); }
+  50%      { box-shadow: 0 0 0 6px var(--brand-soft); }
+}
+
+.studio-back-btn:hover {
+  border-color: var(--brand);
+  color: var(--brand);
+}
+.studio-conv-title { font-size: 13px; font-weight: 600; }
+.studio-conv-meta { font-size: 12px; color: var(--text-3); }
+.studio-spacer { flex: 1; }
+.studio-top-chip {
+  padding: 4px 10px;
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  font-size: 11px;
+  color: var(--text-2);
+  font-weight: 500;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.studio-top-chip b { color: var(--brand); }
+.studio-name-pill {
+  padding: 5px 12px;
+  border-radius: var(--radius-pill);
+  background: var(--brand-soft);
+  color: var(--brand-deep);
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+/* ============================================================
+   Picker page
+   ============================================================ */
+.studio-picker { padding: 0; }
+.studio-cta {
+  margin: 20px 22px 0;
+  background: var(--text);
+  color: var(--bg);
+  border-radius: var(--radius-lg);
+  padding: 18px 22px;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+.studio-cta .icon {
+  width: 44px; height: 44px;
+  border-radius: var(--radius-md);
+  background: var(--brand);
+  display: flex; align-items: center; justify-content: center;
+  color: #fff; font-size: 18px;
+}
+.studio-cta .copy { flex: 1; }
+.studio-cta .title { font-weight: 700; font-size: 15px; }
+.studio-cta .sub { font-size: 12px; color: rgba(250,248,243,.65); margin-top: 2px; }
+.studio-cta .go-btn {
+  padding: 10px 18px;
+  border-radius: var(--radius-pill);
+  background: var(--brand);
+  color: #fff;
+  border: none;
+  font-weight: 700;
+  font-size: 13px;
+  cursor: pointer;
+}
+.studio-cta .go-btn:hover { background: var(--brand-hover); }
+
+.studio-section-head {
+  padding: 22px 22px 12px;
+  display: flex;
+  align-items: end;
+  gap: 14px;
+}
+.studio-section-title { font-size: 15px; font-weight: 700; color: var(--text); }
+.studio-section-sub { font-size: 12px; color: var(--text-3); }
+.studio-filters { margin-left: auto; display: flex; gap: 6px; }
+.studio-filter {
+  padding: 5px 11px;
+  border-radius: var(--radius-pill);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  color: var(--text-2);
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.studio-filter.active {
+  background: var(--text);
+  color: var(--bg);
+  border-color: var(--text);
+}
+
+.studio-grid {
+  padding: 0 22px 22px;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 12px;
+}
+.studio-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: 14px;
+  cursor: pointer;
+  display: flex; flex-direction: column; gap: 6px;
+  transition: transform .12s, border-color .12s, box-shadow .15s;
+}
+.studio-card:hover {
+  border-color: var(--brand);
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(226,115,31,.10);
+}
+.studio-card.done { opacity: 0.55; }
+.studio-card .head { display: flex; align-items: center; gap: 8px; }
+.studio-card .num { font-size: 14px; font-weight: 800; color: var(--text); }
+.studio-card .badge {
+  font-size: 10px; font-weight: 800;
+  padding: 3px 8px; border-radius: var(--radius-chip);
+  letter-spacing: .3px;
+}
+.studio-card .badge.todo { background: var(--brand-soft); color: var(--brand-deep); }
+.studio-card .badge.done { background: #e6efe1; color: var(--success); }
+.studio-card .date { font-size: 12px; color: var(--text-3); margin-left: auto; }
+.studio-card .meta {
+  font-size: 12px; color: var(--text-3);
+  display: flex; gap: 12px;
+}
+
+/* ============================================================
+   Recording page
+   ============================================================ */
+.studio-rec-progress {
+  padding: 11px 22px;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+}
+.studio-rec-progress .text { font-size: 12px; color: var(--text); font-weight: 600; }
+.studio-rec-progress .bar {
+  flex: 1; height: 4px;
+  border-radius: var(--radius-pill);
+  background: var(--bg-2);
+  overflow: hidden;
+}
+.studio-rec-progress .fill {
+  height: 100%;
+  background: var(--brand);
+  transition: width .3s;
+}
+.studio-rec-progress .pct {
+  font-size: 12px; color: var(--text-3);
+  font-feature-settings: "tnum";
+}
+
+.studio-rec-shell {
+  display: grid;
+  grid-template-columns: 340px 1fr;
+  /* Explicit viewport-relative height — relying on flex from .studio-recording
+     doesn't work because Gradio inserts wrappers (.block, .prose) that break
+     the flex chain. */
+  height: calc(100vh - var(--rec-chrome-h));
+  overflow: hidden;
+}
+.studio-rec-rail {
+  background: var(--bg);
+  padding: 14px 16px;
+  border-right: 1px solid var(--border);
+  height: 100%;
+  overflow-y: auto;
+  min-height: 0;
+}
+.studio-rec-hero {
+  display: flex; flex-direction: column;
+  align-items: center; justify-content: center;
+  gap: 18px;
+  padding: 36px 22px;
+  background: var(--bg);
+  height: 100%;
+  overflow-y: auto;
+  min-height: 0;
+}
+
+/* Rail items */
+.rail-head {
+  font-size: 11px; color: var(--text-3); font-weight: 700;
+  letter-spacing: .04em; text-transform: uppercase;
+  margin-bottom: 10px;
+  display: flex; gap: 8px; align-items: center;
+}
+.count-pill {
+  background: var(--brand); color: #fff;
+  font-size: 10px; font-weight: 800;
+  padding: 2px 7px; border-radius: var(--radius-pill);
+}
+.rail-ctx {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: 10px 12px;
+  margin-bottom: 6px;
+  display: flex; gap: 10px; align-items: center;
+}
+.rail-ctx .role {
+  font-size: 10px; font-weight: 700; color: var(--text-2);
+  background: var(--surface-2);
+  padding: 2px 7px; border-radius: var(--radius-chip);
+}
+.rail-ctx .num { font-size: 10px; color: var(--text-3); }
+.rail-ctx .text { flex: 1; font-size: 12.5px; color: var(--text-2); }
+.rail-ctx .play-btn {
+  width: 26px; height: 26px;
+  border-radius: 50%;
+  background: var(--surface-2);
+  color: var(--brand);
+  border: 1px solid var(--border);
+  display: flex; align-items: center; justify-content: center;
+  font-size: 10px; cursor: pointer;
+}
+.rail-ctx .play-btn:hover {
+  background: var(--brand); color: #fff; border-color: var(--brand);
+}
+.rail-ctx.playing,
+.rail-ctx.current {
+  background: var(--brand-soft);
+  border-color: var(--brand);
+  box-shadow: 0 0 0 3px var(--brand-soft);
+}
+.rail-ctx.playing .role,
+.rail-ctx.current .role { background: var(--brand); color: #fff; }
+.rail-ctx.playing .play-btn,
+.rail-ctx.current .play-btn { background: var(--brand); color: #fff; border-color: var(--brand); }
+
+/* Future user turns — faded but still previewable. */
+.rail-ctx.future { opacity: 0.55; }
+.rail-ctx.future .text { color: var(--text-3); }
+
+/* Current assistant turn — emphasis matches "Đang thu" state. */
+.rail-rec.current {
+  background: var(--brand-soft);
+  border-color: var(--brand);
+  box-shadow: 0 0 0 3px var(--brand-soft);
+}
+.rail-rec.current::before { background: var(--brand); width: 4px; }
+.rail-rec.current .top b { color: var(--brand); }
+
+/* Future assistant turns — clickable, dashed border, lifts on hover. */
+.rail-rec.future {
+  background: transparent;
+  border-style: dashed;
+  opacity: 0.75;
+  cursor: pointer;
+  transition: opacity .15s, border-color .15s, background .15s;
+}
+.rail-rec.future:hover {
+  opacity: 1;
+  border-style: solid;
+  border-color: var(--brand);
+  background: var(--brand-soft);
+}
+.rail-rec.future:hover::before { background: var(--brand); }
+.rail-rec.future:hover .top b { color: var(--brand); }
+.rail-rec.future::before { background: var(--border-strong); }
+.rail-rec.future .top b { color: var(--text-3); }
+.rail-rec.future .text { color: var(--text-2); }
+.rail-rec.future .actions { padding-left: 8px; }
+.rail-rec.future .actions button {
+  padding: 5px 10px;
+  border-radius: var(--radius-sm);
+  font-size: 11px; font-weight: 600;
+  cursor: pointer;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text-2);
+}
+.rail-rec.future:hover .actions button {
+  background: var(--brand); color: #fff; border-color: var(--brand);
+}
+
+.rail-rec {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: 12px;
+  margin-bottom: 6px;
+  position: relative;
+}
+.rail-rec::before {
+  content: "";
+  position: absolute;
+  left: -1px; top: 12px; bottom: 12px;
+  width: 3px;
+  background: var(--brand);
+  border-radius: 0 3px 3px 0;
+}
+.rail-rec .top {
+  display: flex; align-items: center; gap: 8px;
+  font-size: 11px; color: var(--text-3);
+  margin-bottom: 6px; padding-left: 8px;
+}
+.rail-rec .top b {
+  color: var(--brand); font-weight: 800;
+  font-size: 10px;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+}
+.rail-rec .text {
+  font-size: 13px; color: var(--text);
+  margin-bottom: 10px; padding-left: 8px;
+  font-weight: 500;
+}
+.rail-rec .actions {
+  display: flex; gap: 6px; padding-left: 8px;
+}
+.rail-rec .actions button {
+  padding: 5px 10px;
+  border-radius: var(--radius-sm);
+  font-size: 11px; font-weight: 600;
+  cursor: pointer;
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  color: var(--text-2);
+}
+.rail-rec .actions button.play {
+  background: var(--text);
+  color: var(--bg);
+  border-color: var(--text);
+}
+.rail-rec .actions button:hover {
+  border-color: var(--brand);
+  color: var(--brand);
+}
+.rail-rec .actions button.play:hover {
+  background: var(--brand);
+  color: #fff;
+  border-color: var(--brand);
+}
+
+/* Hero */
+.hero-role-tag {
+  font-size: 11px; font-weight: 700;
+  color: var(--brand-deep);
+  padding: 5px 12px;
+  border-radius: var(--radius-pill);
+  background: var(--brand-soft);
+}
+.hero-turn-card {
+  width: min(560px, 92%);
+  padding: 28px 30px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  font-size: 24px;
+  font-weight: 500;
+  color: var(--text);
+  line-height: 1.5;
+  text-align: center;
+  letter-spacing: -0.015em;
+  box-shadow: var(--shadow-card);
+}
+.hero-turn-card.recording { border-color: var(--brand); }
+.hero-rec-btn {
+  width: 80px; height: 80px;
+  border-radius: 50%;
+  background: var(--brand);
+  border: none;
+  cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+  box-shadow: var(--shadow-rec);
+  transition: transform .15s;
+}
+.hero-rec-btn:hover { background: var(--brand-hover); transform: scale(1.04); }
+.hero-rec-btn .inner {
+  width: 24px; height: 24px;
+  border-radius: 50%;
+  background: #fff;
+}
+.hero-rec-btn.stop {
+  animation: rec-pulse 1.4s ease-in-out infinite;
+}
+.hero-rec-btn.stop .inner {
+  border-radius: 5px;
+  width: 26px; height: 26px;
+}
+@keyframes rec-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(226,115,31,.55); }
+  50%      { box-shadow: 0 0 0 14px rgba(226,115,31,0); }
+}
+.hero-timer {
+  font-family: ui-monospace, "JetBrains Mono", monospace;
+  font-size: 28px; font-weight: 700;
+  color: var(--brand);
+  letter-spacing: 1px;
+}
+.hero-waveform {
+  display: flex; gap: 3px;
+  align-items: center; justify-content: center;
+  height: 48px;
+  width: min(420px, 100%);
+}
+.hero-waveform .bar {
+  width: 4px;
+  background: var(--brand);
+  border-radius: var(--radius-pill);
+  opacity: .7;
+}
+.hero-hint { font-size: 12.5px; color: var(--text-3); }
+.hero-hint b { color: var(--text); font-weight: 600; }
+.hero-kbd {
+  font-family: ui-monospace, monospace;
+  font-size: 10px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  color: var(--text-2);
+}
+
+.hero-audio-bar {
+  width: min(420px, 100%);
+  display: flex; align-items: center; gap: 10px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  padding: 8px 14px;
+  font-size: 13px; color: var(--text);
+  font-weight: 600;
+}
+.hero-audio-bar.user { border-color: var(--brand); background: var(--brand-soft); }
+.hero-audio-bar .play-circle {
+  width: 32px; height: 32px;
+  border-radius: 50%;
+  background: var(--brand);
+  color: #fff;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 13px;
+  border: none; cursor: pointer;
+  flex-shrink: 0;
+}
+.hero-audio-bar .scrub {
+  flex: 1; height: 5px;
+  background: var(--bg-2);
+  border-radius: var(--radius-pill);
+  overflow: hidden;
+  position: relative;
+}
+.hero-audio-bar .scrub > div {
+  height: 100%;
+  background: var(--brand);
+  border-radius: var(--radius-pill);
+}
+
+.hero-actions {
+  display: flex; gap: 12px;
+}
+.hero-btn {
+  padding: 12px 22px;
+  border-radius: var(--radius-pill);
+  font-size: 14px; font-weight: 700;
+  cursor: pointer; border: none;
+  display: inline-flex; align-items: center; gap: 8px;
+}
+.hero-btn.primary {
+  background: var(--brand);
+  color: #fff;
+  box-shadow: 0 4px 12px rgba(226,115,31,.28);
+}
+.hero-btn.primary:hover { background: var(--brand-hover); }
+.hero-btn.secondary {
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--border);
+}
+.hero-btn.secondary:hover { border-color: var(--brand); color: var(--brand); }
+.hero-btn.skip {
+  background: transparent;
+  color: var(--text-3);
+  font-size: 12px; font-weight: 600;
+}
+
+/* ============================================================
+   First-access name prompt modal
+   Blocks interaction until the user types a collaborator name —
+   that name keys the output folder for everything they record.
+   ============================================================ */
+.studio-modal-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 100000;
+  background: rgba(31, 29, 24, 0.55);
+  backdrop-filter: blur(4px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  animation: studio-modal-fade .15s ease-out;
+}
+@keyframes studio-modal-fade {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+.studio-modal {
+  background: var(--surface);
+  border-radius: var(--radius-lg);
+  box-shadow: 0 24px 64px -12px rgba(0, 0, 0, .35);
+  padding: 32px 28px 24px;
+  width: min(420px, 100%);
+  text-align: center;
+  border: 1px solid var(--border);
+  animation: studio-modal-pop .2s ease-out;
+}
+@keyframes studio-modal-pop {
+  from { opacity: 0; transform: scale(.94) translateY(8px); }
+  to   { opacity: 1; transform: scale(1)     translateY(0); }
+}
+.studio-modal-emoji {
+  font-size: 44px;
+  margin-bottom: 4px;
+  line-height: 1;
+}
+.studio-modal h2 {
+  font-family: "Tiempos", "Charter", Georgia, serif;
+  font-size: 22px;
+  font-weight: 700;
+  margin: 8px 0 6px;
+  color: var(--text);
+  letter-spacing: -0.01em;
+}
+.studio-modal p {
+  font-size: 13.5px;
+  color: var(--text-2);
+  line-height: 1.5;
+  margin: 0 0 18px;
+}
+.studio-modal input {
+  width: 100%;
+  padding: 12px 14px;
+  font-size: 15px;
+  border-radius: var(--radius-md);
+  border: 1.5px solid var(--border-strong);
+  background: var(--bg);
+  color: var(--text);
+  outline: none;
+  transition: border-color .15s, background .15s;
+  margin-bottom: 12px;
+  box-sizing: border-box;
+}
+.studio-modal input:focus {
+  border-color: var(--brand);
+  background: var(--surface);
+}
+.studio-modal input.studio-modal-error {
+  border-color: #c2410c;
+  animation: studio-modal-shake .25s ease-in-out;
+}
+@keyframes studio-modal-shake {
+  0%, 100% { transform: translateX(0); }
+  25%      { transform: translateX(-5px); }
+  75%      { transform: translateX(5px); }
+}
+.studio-modal-go {
+  width: 100%;
+  padding: 12px 18px;
+  font-size: 15px;
+  font-weight: 700;
+  background: var(--brand);
+  color: #fff;
+  border: none;
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  transition: background .15s, transform .05s;
+}
+.studio-modal-go:hover { background: var(--brand-hover); }
+.studio-modal-go:active { transform: translateY(1px); }
+
+/* The Gradio Audio component is kept in the DOM so studio.js can
+   programmatically click its record/stop buttons, but visually hidden —
+   all recording UI is drawn by the custom hero (.hero-rec-btn, waveform,
+   timer). Position off-screen rather than display:none so the underlying
+   <button> stays focusable and click()able. */
+#mic-audio {
+  position: absolute !important;
+  left: -10000px !important;
+  top: 0 !important;
+  width: 1px !important;
+  height: 1px !important;
+  overflow: hidden !important;
+  opacity: 0 !important;
+  pointer-events: none !important;
+}
+
+/* The hidden orchestration components — invisible but in DOM */
+.studio-hidden { display: none !important; }

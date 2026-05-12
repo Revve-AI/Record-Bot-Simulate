@@ -28,294 +28,24 @@ import soundfile as sf
 # sounddevice không cần nữa: ghi âm chuyển sang micro client browser qua
 # gr.Audio(sources=["microphone"]) để hoạt động được với gradio.live.
 
-import torch
-from silero_vad import (
-    get_speech_timestamps,
-    load_silero_vad,
-    read_audio,
+from recording_backend import (
+    SAMPLE_RATE,
+    parse_dialog_file,
+    list_dialogs,
+    sanitize_collaborator_name,
+    session_output_dir,
+    is_dialog_done,
+    build_dropdown_choices,
+    trim_silences,
+    segment_user_turns,
 )
 
-# ---------- Config ----------
-SAMPLE_RATE = 16000
-VAD_CHUNK = 512                  # samples per VAD chunk @16 kHz
+# ---------- Config (app-only) ----------
 SILENCE_MS = 1500                # tự dừng khi im lặng 1.5s
 USER_PAUSE_SEC = 0.6             # nghỉ ngắn sau turn user trước khi sang câu kế
 MAX_RECORDING_SEC = 90           # an toàn: dừng cứng sau 90s
 DEFAULT_INPUT_DIR = "./input"
 DEFAULT_OUTPUT_DIR = "./output"
-
-print("[Init] Đang tải mô hình silero-vad ...")
-VAD_MODEL = load_silero_vad()
-print("[Init] Đã tải xong.")
-
-# Warm-up VAD — JIT compile graph ngay từ đầu, tránh action_load đầu tiên
-# bị chậm 1-3s do silero-vad lần đầu chạy.
-print("[Init] Warm-up silero-vad ...")
-_t0 = time.time()
-try:
-    _warm = np.zeros(SAMPLE_RATE, dtype=np.float32)  # 1s silence
-    _ = get_speech_timestamps(
-        torch.from_numpy(_warm), VAD_MODEL, sampling_rate=SAMPLE_RATE,
-        threshold=0.4, min_silence_duration_ms=400, min_speech_duration_ms=80,
-    )
-    print(f"[Init] Warm-up xong ({1000*(time.time()-_t0):.0f}ms)")
-except Exception as _exc:
-    print(f"[Init] Warm-up lỗi: {_exc}")
-
-
-# ---------- Text normalization ----------
-from text_utils import normalize_vietnamese_text  # noqa: E402
-
-
-
-# ---------- Dialog parsing ----------
-# Format dialog: "user: text"  hoặc  "assistant: text"
-# (Tuỳ chọn) có thể thêm `\tSTART\tEND` ở cuối — sample index ở 16kHz —
-# để cắt audio user chính xác. Nếu không có → fallback VAD.
-_ROLE_LINE_RE = re.compile(
-    r"^(user|assistant)\s*:\s*(.+?)(?:\s*\t(\d+)\s*\t(\d+))?\s*$"
-)
-# Format CŨ với speaker_X — giữ regex để hỗ trợ dialog chưa convert
-_SPEAKER_LINE_RE = re.compile(
-    r"^speaker_(\d+)\s*:\s*(.+?)(?:\s*\t(\d+)\s*\t(\d+))?\s*$"
-)
-SPEAKER_ROLE = {"0": "assistant", "1": "user"}
-
-
-def parse_dialog_file(path: str) -> list[dict]:
-    turns: list[dict] = []
-    with open(path, encoding="utf-8") as f:
-        for line in f:
-            raw_line = line.rstrip("\n\r")
-            if not raw_line.strip():
-                continue
-
-            # 1) Định dạng chính: "user: text..." hoặc "assistant: text..."
-            m = _ROLE_LINE_RE.match(raw_line)
-            if m:
-                role = m.group(1)
-                text = m.group(2).strip()
-                start = int(m.group(3)) if m.group(3) else None
-                end = int(m.group(4)) if m.group(4) else None
-                turns.append({
-                    "role": role,
-                    "text_raw": text,
-                    "text": normalize_vietnamese_text(text),
-                    "start_sample": start,
-                    "end_sample": end,
-                })
-                continue
-
-            # 2) Tương thích ngược: dialog cũ dùng "speaker_X:"
-            m = _SPEAKER_LINE_RE.match(raw_line)
-            if m:
-                role = SPEAKER_ROLE.get(m.group(1), "user")
-                text = m.group(2).strip()
-                start = int(m.group(3)) if m.group(3) else None
-                end = int(m.group(4)) if m.group(4) else None
-                turns.append({
-                    "role": role,
-                    "text_raw": text,
-                    "text": normalize_vietnamese_text(text),
-                    "start_sample": start,
-                    "end_sample": end,
-                })
-    return turns
-
-
-def list_dialogs(input_dir: str) -> list[str]:
-    p = Path(input_dir).expanduser()
-    if not p.exists():
-        return []
-    return sorted(
-        f.name
-        for f in p.iterdir()
-        if f.suffix == ".dialog" and not f.name.endswith(".dialog.mark")
-    )
-
-
-def sanitize_collaborator_name(name: str) -> str:
-    """Chuẩn hoá tên CTV để dùng làm tên thư mục (an toàn cross-platform)."""
-    name = (name or "").strip()
-    if not name:
-        return ""
-    name = re.sub(r"[/\\:*?\"<>|]", "_", name)
-    name = name.replace("..", "_")
-    name = re.sub(r"\s+", " ", name).strip()
-    return name
-
-
-def session_output_dir(output_dir: str, collab_name: str, dialog_name: str) -> str:
-    """output/<tên CTV>/<dialog stem>/"""
-    safe_name = sanitize_collaborator_name(collab_name) or "unnamed"
-    return os.path.join(output_dir, safe_name, Path(dialog_name).stem)
-
-
-def is_dialog_done(dialog_name: str, output_dir: str, collab_name: str = "") -> bool:
-    """'Đã thu âm' khi `dialog.json` tồn tại trong thư mục của CTV này."""
-    if not dialog_name:
-        return False
-    marker = (
-        Path(session_output_dir(output_dir, collab_name, dialog_name))
-        .expanduser() / "dialog.json"
-    )
-    return marker.exists()
-
-
-def _friendly_dialog_label(idx: int, name: str, done: bool) -> str:
-    """Hội thoại #N — DD/MM/YYYY HH:MM (ưu tiên dễ đọc thay vì UUID)."""
-    try:
-        dt = datetime.strptime(name[:19], "%Y-%m-%dT%H-%M-%S")
-        when = dt.strftime("%d/%m/%Y  %H:%M")
-    except Exception:
-        when = name[:19]
-    badge = "✅ Đã xong" if done else "⬜ Chưa thu"
-    return f"{badge}  ·  Hội thoại #{idx + 1}  ·  {when}"
-
-
-def build_dropdown_choices(
-    input_dir: str,
-    output_dir: str,
-    hide_done: bool = True,
-    collab_name: str = "",
-) -> list[tuple[str, str]]:
-    """Dropdown choices — đánh dấu done theo từng CTV (mỗi người có output riêng)."""
-    choices: list[tuple[str, str]] = []
-    all_names = list_dialogs(input_dir)
-    for idx, name in enumerate(all_names):
-        done = is_dialog_done(name, output_dir, collab_name)
-        if done and hide_done:
-            continue
-        choices.append((_friendly_dialog_label(idx, name, done), name))
-    return choices
-
-
-# ---------- Audio segmentation for user turns ----------
-def trim_silences(audio: np.ndarray, sr: int,
-                  min_silence_ms: int = 400,
-                  speech_pad_ms: int = 150,
-                  internal_gap_ms: int = 250) -> np.ndarray:
-    """Cắt silence dài ở đầu/cuối + ép silence giữa các đoạn nói còn `internal_gap_ms`.
-
-    Dùng silero-vad để phát hiện các speech region trong segment, sau đó nối
-    lại với gap ngắn cố định. Nếu không phát hiện được speech, trả về nguyên
-    segment (giữ an toàn).
-    """
-    if audio is None or len(audio) == 0:
-        return audio
-    # silero-vad chỉ hỗ trợ 16 kHz hoặc 8 kHz. Nếu khác, giữ nguyên.
-    if sr not in (8000, 16000):
-        return audio
-    try:
-        audio_tensor = torch.from_numpy(audio.astype(np.float32))
-        timestamps = get_speech_timestamps(
-            audio_tensor, VAD_MODEL,
-            sampling_rate=sr,
-            threshold=0.4,
-            min_silence_duration_ms=min_silence_ms,
-            min_speech_duration_ms=80,
-            speech_pad_ms=speech_pad_ms,
-        )
-        if not timestamps:
-            return audio  # an toàn: không thấy speech → giữ nguyên
-
-        gap = np.zeros(int(internal_gap_ms / 1000.0 * sr), dtype=audio.dtype)
-        parts = []
-        for i, t in enumerate(timestamps):
-            if i > 0:
-                parts.append(gap)
-            s = max(0, int(t["start"]))
-            e = min(len(audio), int(t["end"]))
-            if e > s:
-                parts.append(audio[s:e])
-        if not parts:
-            return audio
-        return np.concatenate(parts)
-    except Exception as exc:
-        print(f"[trim_silences] {exc} → giữ nguyên segment")
-        return audio
-
-
-def segment_user_turns(wav_path: str, dialog: list[dict]):
-    """Tách audio user từ wav theo start/end samples đã có sẵn trong dialog.
-
-    Format mới: mỗi turn đã có `start_sample` / `end_sample` (đơn vị: sample
-    ở SR 16kHz, khớp với file wav). Cắt trực tiếp, không cần VAD.
-
-    Nếu turn không có timestamp (format cũ): fallback dùng VAD (giữ để tương thích).
-    """
-    if not wav_path or not os.path.exists(wav_path):
-        return {i: None for i, t in enumerate(dialog) if t["role"] == "user"}
-
-    # Có timestamp sẵn → cắt thẳng
-    has_marks = any(
-        t.get("start_sample") is not None and t.get("end_sample") is not None
-        for t in dialog
-    )
-
-    if has_marks:
-        try:
-            audio_np, sr = sf.read(wav_path, dtype="float32")
-            if audio_np.ndim > 1:
-                audio_np = audio_np.mean(axis=1)  # ép về mono
-
-            print(f"[segment] {os.path.basename(wav_path)}: "
-                  f"dùng timestamps có sẵn (SR wav = {sr}Hz)")
-
-            # Cắt nhanh theo timestamps, KHÔNG trim ở đây.
-            # trim_silences() sẽ chạy lazy (1 lần / 1 turn) trong
-            # get_trimmed_user_audio() khi audio thực sự cần phát.
-            result: dict[int, tuple | None] = {}
-            n_samples = len(audio_np)
-            for i, turn in enumerate(dialog):
-                if turn["role"] != "user":
-                    continue
-                start = turn.get("start_sample")
-                end = turn.get("end_sample")
-                if start is None or end is None:
-                    result[i] = None
-                    continue
-                start = max(0, int(start))
-                end = min(n_samples, int(end))
-                if end <= start:
-                    result[i] = None
-                    continue
-                result[i] = (sr, audio_np[start:end])
-            return result
-        except Exception as exc:
-            print(f"[Warn] Không cắt được theo timestamps: {exc}")
-            # Tiếp tục fallback VAD nếu lỗi
-
-    # Fallback: VAD-based segmentation (cho file dialog format cũ)
-    try:
-        audio = read_audio(wav_path, sampling_rate=SAMPLE_RATE)
-        timestamps = get_speech_timestamps(
-            audio, VAD_MODEL,
-            sampling_rate=SAMPLE_RATE,
-            min_silence_duration_ms=900,
-            min_speech_duration_ms=150,
-            threshold=0.4,
-            speech_pad_ms=200,
-        )
-        audio_np = (
-            audio.numpy() if hasattr(audio, "numpy") else np.asarray(audio)
-        ).astype(np.float32)
-        n_segs = len(timestamps)
-        print(f"[segment] VAD fallback: {len(dialog)} turns ↔ {n_segs} segments")
-        result = {}
-        for i, turn in enumerate(dialog):
-            if turn["role"] != "user":
-                continue
-            if i < n_segs:
-                t = timestamps[i]
-                # Cắt thô, trim lazy về sau
-                result[i] = (SAMPLE_RATE, audio_np[t["start"]: t["end"]])
-            else:
-                result[i] = None
-        return result
-    except Exception as exc:
-        print(f"[Warn] Không tách được audio: {exc}")
-        return {i: None for i, t in enumerate(dialog) if t["role"] == "user"}
 
 
 # ---------- UI rendering helpers ----------
@@ -741,6 +471,16 @@ def action_recording_done(state: dict, mic_value):
     )
     sf.write(final_path, audio_int16, sr)
     state["recordings"][idx] = final_path
+    # Persist partial progress so the picker can show "thu tiếp"
+    try:
+        from progress_tracking import write_progress
+        write_progress(
+            state["output_dir"],
+            last_recorded_turn=idx,
+            recorded_count=len(state.get("recordings", {})),
+        )
+    except Exception as exc:
+        print(f"[progress] write failed: {exc}")
     state.get("_audio_url_cache", {}).pop(("a", idx), None)
     print(f"[recording_done] saved {final_path}  ({len(audio)/sr:.1f}s @ {sr}Hz)")
 
@@ -845,6 +585,13 @@ def action_finish(state: dict):
     with open(os.path.join(out_dir, "dialog.json"), "w", encoding="utf-8") as f:
         json.dump(meta, f, ensure_ascii=False, indent=2)
 
+    # Conversation fully done — drop partial-progress file.
+    try:
+        from progress_tracking import clear_progress
+        clear_progress(out_dir)
+    except Exception as exc:
+        print(f"[progress] clear failed: {exc}")
+
     return gr.update(
         visible=True,
         value=(
@@ -856,995 +603,782 @@ def action_finish(state: dict):
     )
 
 
-# ---------- Build UI ----------
-CSS = """
-/* ============================================================
-   CSS variables  —  hằng số layout responsive
-   ============================================================ */
-:root {
-  --container-max: 1320px;
-  --sidebar-w: clamp(240px, 22vw, 300px);
-  --sidebar-gap: 20px;
-  --avatar-w: 38px;
-  --avatar-gap: 10px;
-  --bubble-offset: calc(var(--avatar-w) + var(--avatar-gap));
-  --bubble-w: clamp(320px, 60%, 620px);
-  --font-bubble: clamp(15px, 0.6vw + 13px, 17px);
-  --font-bubble-lg: clamp(18px, 0.6vw + 16px, 22px);
-}
+# ---------- Picker render helpers ----------
 
-.gradio-container {
-  max-width: var(--container-max) !important;
-  margin: auto !important;
-  padding: 8px clamp(12px, 1.5vw, 24px) !important;
-}
+_TURN_FILE_RE = re.compile(r"^turn_(\d+)_assistant\.wav$")
 
-/* ============================================================
-   Buttons
-   ============================================================ */
-.big-btn button {
-  font-size: clamp(15px, 0.4vw + 14px, 18px) !important;
-  padding: clamp(12px, 1vw + 6px, 18px) clamp(20px, 2vw, 32px) !important;
-  font-weight: 700 !important;
-  min-height: 52px !important;
-}
-.huge-btn button {
-  font-size: clamp(18px, 0.7vw + 14px, 22px) !important;
-  padding: clamp(16px, 1.2vw + 8px, 22px) clamp(28px, 2.5vw, 40px) !important;
-  font-weight: 800 !important;
-  min-height: clamp(60px, 5vw + 30px, 76px) !important;
-  box-shadow: 0 4px 14px rgba(16,185,129,.25) !important;
-}
 
-.app-title { text-align: center; padding: 6px 0 0; }
-.app-title h1 { font-size: clamp(22px, 1.4vw + 16px, 30px) !important; }
-.app-subtitle {
-  text-align: center; color: #6B7280;
-  font-size: clamp(13px, 0.4vw + 11px, 16px);
-  margin: -10px 0 18px;
-}
+def _load_existing_recordings(session_dir: str) -> dict[int, str]:
+    """Scan the session dir for previously recorded turns.
 
-/* ============================================================
-   Guide box (4 bước)
-   ============================================================ */
-.guide-box {
-  background: linear-gradient(135deg, #EFF6FF 0%, #ECFDF5 100%);
-  border: 1px solid #BFDBFE;
-  border-radius: 14px;
-  padding: clamp(12px, 1vw + 6px, 18px) clamp(16px, 1.5vw + 8px, 24px);
-  margin: 4px 0 18px;
-}
-.guide-box h3 {
-  margin: 0 0 8px;
-  color: #1E3A8A;
-  font-size: clamp(15px, 0.5vw + 13px, 18px);
-}
-.guide-box ol {
-  margin: 0;
-  padding-left: 22px;
-  line-height: 1.75;
-  font-size: clamp(13px, 0.3vw + 12px, 15px);
-}
-.guide-box li b { color: #065F46; }
-.start-row { display: flex; gap: 12px; align-items: end; }
+    gr.State lives in memory and is wiped on page refresh, so without this the
+    user appears to lose all their work. The .wav files are still on disk —
+    rebuild the recordings dict from them.
+    """
+    if not os.path.isdir(session_dir):
+        return {}
+    out: dict[int, str] = {}
+    for name in os.listdir(session_dir):
+        m = _TURN_FILE_RE.match(name)
+        if m:
+            out[int(m.group(1))] = os.path.realpath(os.path.join(session_dir, name))
+    return out
 
-/* ===== Recording card + animations ===== */
-.rec-card {
-  padding: 22px 24px;
-  border-radius: 16px;
-  background: #FEF2F2;
-  border: 3px solid #FCA5A5;
-  transition: background .35s ease, border-color .35s ease, box-shadow .35s ease;
-}
-.rec-card.speaking {
-  background: linear-gradient(135deg, #ECFDF5 0%, #D1FAE5 100%);
-  border-color: #10B981;
-  box-shadow: 0 0 0 0 rgba(16,185,129,.5);
-  animation: card-glow 1.6s ease-in-out infinite;
-}
-@keyframes card-glow {
-  0%, 100% { box-shadow: 0 0 0 0 rgba(16,185,129,.4); }
-  50%      { box-shadow: 0 0 0 14px rgba(16,185,129,0); }
-}
 
-.rec-card-head {
-  display: flex; align-items: center; gap: 12px; margin-bottom: 18px;
-}
-.rec-title {
-  font-size: 22px; font-weight: 800; color: #B91C1C;
-  letter-spacing: .3px;
-}
-.rec-card.speaking .rec-title { color: #065F46; }
-.rec-clock {
-  margin-left: auto;
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 20px; color: #374151; font-weight: 700;
-}
+def load_conversation_state(input_dir: str, dialog_name: str,
+                            output_dir: str, collab_name: str,
+                            resume_at: int | None = None) -> dict | None:
+    """Build the recording state dict for a conversation. Returns None on error.
 
-.rec-pulse {
-  display: inline-block;
-  width: 18px; height: 18px; border-radius: 50%;
-  background: #EF4444;
-  box-shadow: 0 0 0 0 rgba(239,68,68,.7);
-  animation: rec-pulse-anim 1.3s infinite;
-}
-.rec-card.speaking .rec-pulse {
-  background: #10B981;
-  animation: rec-pulse-green 0.7s infinite;
-}
-@keyframes rec-pulse-anim {
-  0%   { box-shadow: 0 0 0 0 rgba(239,68,68,.7); transform: scale(1); }
-  70%  { box-shadow: 0 0 0 18px rgba(239,68,68,0); transform: scale(1.15); }
-  100% { box-shadow: 0 0 0 0 rgba(239,68,68,0); transform: scale(1); }
-}
-@keyframes rec-pulse-green {
-  0%   { box-shadow: 0 0 0 0 rgba(16,185,129,.7); transform: scale(1); }
-  70%  { box-shadow: 0 0 0 14px rgba(16,185,129,0); transform: scale(1.2); }
-  100% { box-shadow: 0 0 0 0 rgba(16,185,129,0); transform: scale(1); }
-}
+    `resume_at` — if given, skip to that turn (used by the resume CTA).
+    Otherwise auto-resume past any turns already recorded on disk.
+    """
+    if not dialog_name:
+        return None
+    dialog_path = os.path.join(input_dir, dialog_name)
+    wav_path = dialog_path.replace(".dialog", ".wav")
+    dialog = parse_dialog_file(dialog_path)
+    if not dialog:
+        return None
+    user_audio_per_turn = segment_user_turns(wav_path, dialog)
+    session_dir = session_output_dir(output_dir, collab_name, dialog_name)
+    os.makedirs(session_dir, exist_ok=True)
 
-/* ===== Equalizer bars ===== */
-.eq-container {
-  display: flex; align-items: flex-end; justify-content: center;
-  gap: 6px; height: 96px; padding: 6px 0 4px;
-  margin: 4px 0 16px;
-}
-.eq-bar {
-  width: 14px;
-  background: linear-gradient(to top, #9CA3AF, #D1D5DB);
-  border-radius: 4px 4px 2px 2px;
-  transition: height .12s ease-out, background .25s;
-  min-height: 4px;
-}
-.eq-container.speaking .eq-bar {
-  background: linear-gradient(to top, #059669, #34D399 60%, #6EE7B7);
-  box-shadow: 0 0 6px rgba(16,185,129,.55);
-}
-/* nhịp nhảy nhẹ ngay cả giữa các tick để cảm giác "live" hơn */
-.eq-container.speaking .eq-bar:nth-child(odd)  { animation: eq-jitter 0.34s ease-in-out infinite alternate; }
-.eq-container.speaking .eq-bar:nth-child(even) { animation: eq-jitter 0.42s ease-in-out infinite alternate; }
-.eq-container.speaking .eq-bar:nth-child(3n)   { animation-duration: 0.5s; }
-@keyframes eq-jitter {
-  0%   { transform: scaleY(0.92); }
-  100% { transform: scaleY(1.08); }
-}
+    recordings = _load_existing_recordings(session_dir)
+    if resume_at is not None:
+        current_turn = resume_at
+    elif recordings:
+        current_turn = min(max(recordings.keys()) + 1, len(dialog))
+    else:
+        current_turn = 0
 
-.rec-speech-label {
-  text-align: center;
-  font-size: 16px;
-  font-weight: 700;
-  margin-top: 4px;
-}
-.rec-hint {
-  text-align: center;
-  margin-top: 10px;
-  font-size: 13px;
-  color: #6B7280;
-}
+    return {
+        "collab_name": collab_name,
+        "dialog_name": dialog_name,
+        "dialog_path": dialog_path,
+        "wav_path": wav_path,
+        "output_dir": session_dir,
+        "dialog": dialog,
+        "user_audio_per_turn": user_audio_per_turn,
+        "recordings": recordings,
+        "current_turn": current_turn,
+        "rec_phase": "idle",
+    }
 
-/* ===== Chat-style conversation view ===== */
-.chat-history {
-  max-height: 460px;
-  overflow-y: auto;
-  padding: 16px 8px;
-  background: #F9FAFB;
-  border-radius: 14px;
-  border: 1px solid #E5E7EB;
-  margin: 8px 0 16px;
-  scroll-behavior: smooth;
-}
-.chat-empty {
-  padding: 60px 24px;
-  text-align: center;
-  color: #9CA3AF;
-  font-size: 17px;
-  background: #F9FAFB;
-  border-radius: 14px;
-  border: 2px dashed #D1D5DB;
-}
 
-.msg-row {
-  display: flex;
-  align-items: flex-start;
-  gap: 10px;
-  margin: 10px 0;
-}
-.msg-row.user-side       { flex-direction: row; }
-.msg-row.assistant-side  { flex-direction: row-reverse; }
+def _render_rail(st: dict) -> str:
+    dialog = st.get("dialog", [])
+    idx = st.get("current_turn", 0)
+    recordings = st.get("recordings", {})
+    recorded_count = len(recordings)
+    total = len(dialog)
 
-.avatar {
-  flex: 0 0 auto;
-  width: 38px; height: 38px; border-radius: 50%;
-  display: flex; align-items: center; justify-content: center;
-  font-size: 22px;
-  background: #FFFFFF;
-  border: 1px solid #E5E7EB;
-  box-shadow: 0 1px 2px rgba(0,0,0,.05);
-}
+    rows = []
+    for i, turn in enumerate(dialog):
+        is_user = turn["role"] == "user"
+        is_current = i == idx
+        is_future = i > idx
 
-.bubble {
-  max-width: 55%;
-  padding: 12px 16px;
-  border-radius: 16px;
-  font-size: 16px;
-  line-height: 1.55;
-  position: relative;
-  transition: box-shadow .25s, transform .25s;
-}
-.user-side .bubble {
-  background: #DBEAFE;
-  color: #1E3A8A;
-  border-top-left-radius: 4px;
-}
-.assistant-side .bubble {
-  background: #D1FAE5;
-  color: #065F46;
-  border-top-right-radius: 4px;
-}
-.bubble.past { opacity: .92; }
-.bubble.future {
-  opacity: .5;
-  filter: grayscale(.4);
-}
-.bubble.current {
-  box-shadow: 0 0 0 3px rgba(16,185,129,.35), 0 6px 20px rgba(16,185,129,.2);
-  transform: scale(1.015);
-}
-.user-side .bubble.current {
-  box-shadow: 0 0 0 3px rgba(59,130,246,.35), 0 6px 20px rgba(59,130,246,.2);
-}
+        if is_user:
+            classes = "rail-ctx"
+            if is_current:
+                classes += " current playing"
+            elif is_future:
+                classes += " future"
+            play_icon = "⏸" if is_current else "▶"
+            rows.append(
+                f"<div class='{classes}' data-row-idx='{i}'>"
+                f"<span class='role'>Khách</span>"
+                f"<span class='num'>#{i+1}</span>"
+                f"<span class='text'>{turn['text']}</span>"
+                f"<button class='play-btn' data-play-user='{i}'>{play_icon}</button>"
+                "</div>"
+            )
+        else:
+            # Assistant turn — three states: recorded / current / future
+            if i in recordings:
+                rows.append(
+                    f"<div class='rail-rec' data-row-idx='{i}'>"
+                    f"<div class='top'><b>Đã thu</b><span>· Câu {i+1}</span></div>"
+                    f"<div class='text'>{turn['text']}</div>"
+                    f"<div class='actions'>"
+                    f"<button class='play' data-play-assistant='{i}'>▶ Phát lại</button>"
+                    f"<button data-rerec='{i}'>↻ Thu lại</button>"
+                    "</div></div>"
+                )
+            elif is_current:
+                rows.append(
+                    f"<div class='rail-rec current' data-row-idx='{i}'>"
+                    f"<div class='top'><b>Đang thu</b><span>· Câu {i+1}</span></div>"
+                    f"<div class='text'>{turn['text']}</div>"
+                    "</div>"
+                )
+            else:  # future assistant turn — clickable, jumps to that turn
+                rows.append(
+                    f"<div class='rail-rec future' data-row-idx='{i}' "
+                    f"data-jump-to='{i}' role='button' tabindex='0'>"
+                    f"<div class='top'><b>Chưa thu</b><span>· Câu {i+1}</span></div>"
+                    f"<div class='text'>{turn['text']}</div>"
+                    f"<div class='actions'>"
+                    f"<button data-jump-to='{i}'>→ Thu câu này</button>"
+                    "</div></div>"
+                )
 
-.role-label {
-  font-size: 12px; font-weight: 700; opacity: .75;
-  margin-bottom: 4px; letter-spacing: .2px;
-}
-.role-label .turn-num { font-weight: 500; opacity: .7; }
+    # Auto-scroll the rail so the current turn is centred. Uses the same
+    # <img onerror> trick as play_tag: fires synchronously when the broken
+    # src 404s, and runs on every render (the rail HTML is regenerated when
+    # current_turn changes, so the <img> is fresh every time).
+    scroll_trigger = (
+        f"<img src='/studio-rail-scroll/{time.time_ns()}.gif' "
+        "style='display:none' "
+        "onerror=\""
+        "var el=document.querySelector('.studio-rec-rail .current');"
+        "if(el)el.scrollIntoView({block:'center',behavior:'smooth'});\">"
+    )
+    return (
+        f"<div class='rail-head'>"
+        f"<span class='count-pill'>{recorded_count}/{total}</span>"
+        f" Hội thoại</div>"
+        + "".join(rows)
+        + scroll_trigger
+    )
 
-.bubble-text {
-  font-size: 17px; font-weight: 500;
-  margin: 4px 0 8px;
-}
-.assistant-side .bubble.current .bubble-text {
-  font-size: 19px; font-weight: 600;
-}
 
-.bubble-audio {
-  width: 100%;
-  max-width: 320px;
-  height: 36px;
-  margin-top: 4px;
-  display: block;
-}
-.bubble-marker {
-  margin-top: 8px;
-  padding: 8px 12px;
-  border-radius: 10px;
-  background: rgba(255,255,255,.5);
-  font-size: 13px;
-  font-weight: 600;
-}
-.bubble-marker.bubble-marker-action {
-  background: #FFFFFF;
-  color: #065F46;
-  border: 1px dashed #10B981;
-  font-size: 14px;
-}
-.bubble-marker.dim {
-  background: transparent;
-  color: #9CA3AF;
-  font-style: italic;
-  padding: 4px 8px;
-}
+def _render_hero(st: dict) -> str:
+    dialog = st.get("dialog", [])
+    idx = st.get("current_turn", 0)
+    if not dialog or idx >= len(dialog):
+        # Completion state
+        return (
+            "<span class='hero-role-tag'>🎉 Hoàn thành</span>"
+            f"<div class='hero-turn-card'>Bạn đã thu xong <b>{len(dialog)} câu</b> của hội thoại này.</div>"
+            "<button class='hero-btn primary' data-finish>📦 Hoàn tất & về danh sách</button>"
+        )
 
-/* Current-turn card (bubble lớn nằm ngoài chat-history) */
-.msg-row.current-row {
-  margin: 14px 0 4px;
-}
-.bubble.bubble-large {
-  width: var(--bubble-w);
-  max-width: var(--bubble-w);
-  flex: 0 0 auto;
-  padding: clamp(14px, 1vw + 8px, 20px) clamp(16px, 1.2vw + 10px, 24px);
-  font-size: var(--font-bubble-lg);
-  box-shadow: 0 4px 16px rgba(16,185,129,.18), 0 0 0 3px rgba(16,185,129,.25);
-  box-sizing: border-box;
-}
-.user-side .bubble.bubble-large {
-  box-shadow: 0 4px 16px rgba(59,130,246,.18), 0 0 0 3px rgba(59,130,246,.25);
-}
-.bubble-text.bubble-text-lg {
-  font-size: var(--font-bubble-lg);
-  font-weight: 600;
-  line-height: 1.55;
-}
+    turn = dialog[idx]
+    if turn["role"] == "user":
+        # Auto-playing user turn — embed an <audio> element with data URL
+        url = audio_to_data_url(get_trimmed_user_audio(st, idx))
+        audio_tag = (
+            f"<audio autoplay onended=\"window.__studioAutoNext && window.__studioAutoNext()\" "
+            f"src=\"{url}\" style=\"display:none\"></audio>" if url else ""
+        )
+        return (
+            "<span class='hero-role-tag'>Khách đang nói</span>"
+            f"<div class='hero-turn-card'>{turn['text']}</div>"
+            f"{audio_tag}"
+            "<div class='hero-hint'>⏳ Tự sang câu kế khi nghe xong</div>"
+            "<button class='hero-btn skip' data-skip-user>Bỏ qua câu này →</button>"
+        )
 
-/* Empty placeholder khi chưa có turn nào hoàn thành */
-.chat-empty-soft {
-  padding: 10px 14px;
-  text-align: center;
-  font-size: 13px;
-  color: #9CA3AF;
-  font-style: italic;
-}
+    # Assistant turn — phase-dependent
+    phase = st.get("rec_phase", "idle")
+    if phase == "recording":
+        bar_heights = [18, 30, 14, 38, 26, 42, 18, 32, 22, 36, 14, 28, 40, 20, 34]
+        bars_html = "".join(
+            f"<div class='bar' style='height:{h}px'></div>" for h in bar_heights
+        )
+        return (
+            "<span class='hero-role-tag' style='background:var(--brand);color:#fff'>● ĐANG GHI ÂM</span>"
+            f"<div class='hero-turn-card recording'>{turn['text']}</div>"
+            "<div class='hero-timer'>0:00</div>"
+            f"<div class='hero-waveform'>{bars_html}</div>"
+            "<button class='hero-rec-btn stop' data-rec-stop><span class='inner'></span></button>"
+            "<div class='hero-hint'>Bấm để <b>kết thúc</b> · hoặc <span class='hero-kbd'>Space</span> · tự dừng khi im lặng 1.5s</div>"
+        )
+    elif phase == "preview":
+        return (
+            "<span class='hero-role-tag'>✅ Đã thu xong — nghe lại</span>"
+            f"<div class='hero-turn-card'>{turn['text']}</div>"
+            "<div class='hero-audio-bar'>"
+            f"<button class='play-circle' data-play-assistant='{idx}'>▶</button>"
+            "<div class='scrub'><div></div></div>"
+            "<span>0:00</span>"
+            "</div>"
+            "<div class='hero-actions'>"
+            "<button class='hero-btn secondary' data-rerec>↻ Thu lại</button>"
+            "<button class='hero-btn primary' data-save-next>💾 Lưu & câu kế →</button>"
+            "</div>"
+            "<div class='hero-hint'><span class='hero-kbd'>Enter</span> để lưu · <span class='hero-kbd'>R</span> để thu lại</div>"
+        )
+    # idle
+    return (
+        "<span class='hero-role-tag'>Đến lượt bạn — đọc câu này</span>"
+        f"<div class='hero-turn-card'>{turn['text']}</div>"
+        "<button class='hero-rec-btn' data-rec-start><span class='inner'></span></button>"
+        "<div class='hero-hint'><b>Bấm để ghi âm</b> · hoặc <span class='hero-kbd'>Space</span></div>"
+    )
 
-/* Indicator "Còn N câu nữa" ở phía dưới */
-.future-counter {
-  text-align: center;
-  font-size: 14px;
-  color: #6B7280;
-  padding: 12px 0 4px;
-  font-style: italic;
-}
-.future-counter b { color: #374151; font-style: normal; }
 
-/* ===== Welcome screen ===== */
-.welcome-screen {
-  max-width: 580px !important;
-  margin: clamp(20px, 4vh, 50px) auto !important;
-  padding: clamp(8px, 1.5vw, 16px);
-}
-.welcome-card {
-  text-align: center;
-  padding: clamp(20px, 2vw + 14px, 32px) clamp(16px, 1.5vw + 10px, 28px) 8px;
-  background: linear-gradient(135deg, #EFF6FF 0%, #ECFDF5 100%);
-  border-radius: 18px;
-  border: 1px solid #BFDBFE;
-  margin-bottom: 16px;
-  box-shadow: 0 6px 24px rgba(59,130,246,.10);
-}
-.welcome-emoji {
-  font-size: clamp(36px, 3vw + 24px, 52px);
-  margin-bottom: 4px;
-}
-.welcome-card h1 {
-  color: #1E3A8A;
-  font-size: clamp(22px, 1.6vw + 14px, 30px);
-}
-.welcome-card p {
-  font-size: clamp(14px, 0.4vw + 12px, 17px);
-}
-.welcome-divider {
-  height: 1px;
-  background: rgba(0,0,0,.08);
-  margin: 14px 0 10px;
-}
-.welcome-input-row {
-  align-items: center !important;
-  gap: 8px !important;
-  flex-wrap: wrap !important;
-}
-#ctv-name-input textarea, #ctv-name-input input {
-  font-size: clamp(15px, 0.5vw + 13px, 19px) !important;
-  padding: clamp(12px, 1vw + 6px, 18px) !important;
-  height: clamp(50px, 4vw + 32px, 60px) !important;
-  border-radius: 14px !important;
-  border: 2px solid #BFDBFE !important;
-}
-.welcome-input-row .huge-btn { flex: 0 0 auto; }
-.welcome-input-row .huge-btn button {
-  height: clamp(50px, 4vw + 32px, 60px) !important;
-  padding: 0 clamp(20px, 2vw, 32px) !important;
-  font-size: clamp(15px, 0.5vw + 13px, 18px) !important;
-}
+def render_recording_html(st: dict, collab: str) -> str:
+    if not st.get("dialog"):
+        return "<div style='padding:40px;text-align:center;'>Đang tải hội thoại…</div>"
+    dialog = st["dialog"]
+    idx = st.get("current_turn", 0)
+    total = len(dialog)
+    pct = int(idx / total * 100) if total else 0
 
-/* CTV banner ở đầu màn hình chính */
-.ctv-banner {
-  background: #F3F4F6;
-  border-radius: 10px;
-  padding: 8px 14px;
-  font-size: 14px;
-  color: #374151;
-  display: inline-block;
-  margin-bottom: 4px;
-}
-.ctv-banner b { color: #1E3A8A; }
+    top_bar = (
+        "<div class='studio-topbar'>"
+        "<div class='studio-logo'><span class='dot'></span>Studio</div>"
+        "<button class='studio-back-btn' data-back-to-picker>← Hội thoại khác</button>"
+        "<button class='studio-back-btn studio-listen-all' data-play-all>"
+        "▶ Nghe toàn bộ</button>"
+        f"<span class='studio-conv-title'>"
+        f"{st['dialog_name'].replace('.dialog','')[:30]}</span>"
+        "<div class='studio-spacer'></div>"
+        f"<span class='studio-top-chip'>👤 <b>{collab or '—'}</b></span>"
+        "</div>"
+    )
+    progress = (
+        f"<div class='studio-rec-progress'>"
+        f"<span class='text'>Câu {min(idx+1, total)} / {total}</span>"
+        f"<div class='bar'><div class='fill' style='width:{pct}%'></div></div>"
+        f"<span class='pct'>{pct}%</span>"
+        "</div>"
+    )
+    shell = (
+        "<div class='studio-rec-shell'>"
+        f"<div class='studio-rec-rail'>{_render_rail(st)}</div>"
+        f"<div class='studio-rec-hero'>{_render_hero(st)}</div>"
+        "</div>"
+    )
 
-/* ===== Layout 2 cột (cột phải = sidebar chọn hội thoại) ===== */
-.main-2col {
-  align-items: flex-start !important;
-  gap: 18px !important;
-}
-.main-work-col {
-  display: flex !important;
-  flex-direction: column !important;
-}
+    # Inject on-demand playback (set by play_user_audio / play_assistant_audio actions)
+    play_req = st.pop("_play_request", None)
+    play_tag = ""
+    if play_req:
+        kind, ridx = play_req
+        if kind == "user":
+            url = audio_to_data_url(get_trimmed_user_audio(st, ridx))
+        else:
+            url = audio_to_data_url(st.get("recordings", {}).get(ridx))
+        if url:
+            # Unique id + <img onerror> trick to force a fresh play every
+            # click. data-nonce on <audio autoplay> alone doesn't work because
+            # Svelte's morphdom reuses the existing element when only an
+            # attribute differs, so autoplay only fires on initial mount.
+            # Giving the audio a unique id forces a real re-mount, and the
+            # <img onerror> handler fires synchronously when its broken src
+            # is parsed — guaranteeing .play() runs on each render.
+            play_id = f"studio-play-{time.time_ns()}"
+            play_tag = (
+                f"<audio id='{play_id}' src='{url}' style='display:none'></audio>"
+                f"<img src='/studio-play-trigger/{play_id}.gif' "
+                f"style='display:none' "
+                f"onerror=\"var a=document.getElementById('{play_id}');"
+                f"if(a){{a.currentTime=0;a.play();}}\">"
+            )
 
-/* Sidebar luôn ở giữa viewport bên phải, không scroll theo content.
-   right offset = max(sidebar-gap, lề trái/phải khi container centered).
-   → Trên màn lớn (vw > container-max), sidebar bám đúng mép phải container.
-   → Trên màn nhỏ, sidebar bám mép phải viewport với padding tối thiểu. */
-.sidebar-col {
-  position: fixed !important;
-  right: max(var(--sidebar-gap), calc((100vw - var(--container-max)) / 2 + var(--sidebar-gap))) !important;
-  top: 50% !important;
-  transform: translateY(-50%) !important;
-  width: var(--sidebar-w) !important;
-  max-width: var(--sidebar-w) !important;
-  overflow: visible !important;
-  z-index: 100 !important;
-  background: linear-gradient(135deg, #F0FDF4 0%, #ECFDF5 100%);
-  border: 1px solid #BBF7D0;
-  border-radius: 14px;
-  padding: clamp(10px, 1vw, 16px) !important;
-  box-shadow: 0 8px 28px rgba(16,185,129,.18);
-}
-/* Bảo đảm popup không bị wrapper clip nhưng RIÊNG popup vẫn scroll được */
-.sidebar-col,
-.sidebar-col > *,
-.sidebar-col .gradio-dropdown,
-.sidebar-col .form,
-.sidebar-col .wrap,
-#dialog-dropdown,
-#dialog-dropdown > .wrap,
-#dialog-dropdown > div {
-  overflow: visible !important;
-}
+    # Whole-conversation playback: when "Nghe toàn bộ" is clicked, build a
+    # JSON list of {idx, url} for every turn that has audio, base64-encode it,
+    # and ship a one-shot <img onerror> trigger that hands it to
+    # window.studioStartPlaylist for client-side sequential playback. After
+    # the trigger fires once we drop the marker from state.
+    playlist_tag = ""
+    if st.pop("_playlist_request", False):
+        items = []
+        for i, turn in enumerate(dialog):
+            if turn["role"] == "user":
+                src = get_trimmed_user_audio(st, i)
+            else:
+                src = st.get("recordings", {}).get(i)
+            url = audio_to_data_url(src)
+            if url:
+                items.append({"idx": i, "url": url})
+        if items:
+            payload_b64 = _base64.b64encode(
+                json.dumps(items).encode("utf-8")
+            ).decode()
+            trigger_id = f"studio-playlist-{time.time_ns()}"
+            playlist_tag = (
+                f"<img id='{trigger_id}' "
+                f"src='/studio-playlist-trigger/{trigger_id}.gif' "
+                "style='display:none' "
+                f"data-playlist='{payload_b64}' "
+                "onerror=\"window.studioStartPlaylist && "
+                "window.studioStartPlaylist(this.dataset.playlist)\">"
+            )
 
-/* Popup options — cho phép scroll dọc, đè z-index lên trên */
-#dialog-dropdown ul,
-#dialog-dropdown .options,
-#dialog-dropdown [role="listbox"],
-.gradio-dropdown ul,
-.gradio-dropdown .options,
-.gradio-dropdown [role="listbox"] {
-  z-index: 9999 !important;
-  max-height: 320px !important;
-  overflow-y: auto !important;
-  overflow-x: hidden !important;
-}
-/* Mọi nội dung màn chính chừa khoảng cho sidebar fixed (sidebar-w + 2*gap). */
-.main-screen {
-  padding-right: calc(var(--sidebar-w) + var(--sidebar-gap) * 2) !important;
-}
-.main-work-col {
-  margin-right: 0 !important;
-}
-.sidebar-header {
-  font-weight: 800;
-  font-size: 16px;
-  color: #065F46;
-  margin-bottom: 10px;
-  padding-bottom: 8px;
-  border-bottom: 1px solid #BBF7D0;
-}
-.sidebar-col .gradio-dropdown {
-  margin-bottom: 8px !important;
-}
-.sidebar-col .big-btn button {
-  width: 100% !important;
-  height: 50px !important;
-  min-height: 50px !important;
-  font-size: 16px !important;
-  margin: 4px 0 8px !important;
-}
-.sidebar-col .gradio-checkbox {
-  margin: 6px 0 !important;
-  font-size: 13px;
-}
-.sidebar-accordion { margin-top: 10px !important; }
-.sidebar-accordion .label-wrap {
-  font-size: 13px !important;
-  color: #047857 !important;
-}
+    return top_bar + progress + shell + play_tag + playlist_tag
 
-/* ============================================================
-   Action components — canh theo bubble role (parent flex-column)
-   Width khớp --bubble-w, offset = --bubble-offset (avatar+gap)
-   ============================================================ */
 
-#record-btn,
-#mic-audio,
-#stop-record-btn,
-.recording-row {
-  align-self: flex-end !important;
-  width: var(--bubble-w) !important;
-  max-width: var(--bubble-w) !important;
-  margin: 6px var(--bubble-offset) 14px 0 !important;
-  box-sizing: border-box !important;
-}
-.user-action-row {
-  align-self: flex-start !important;
-  width: var(--bubble-w) !important;
-  max-width: var(--bubble-w) !important;
-  margin: 6px 0 14px var(--bubble-offset) !important;
-  box-sizing: border-box !important;
-}
+def _estimate_duration_min(num_turns: int) -> int:
+    """Rough estimate — 25s per turn average."""
+    return max(1, round(num_turns * 25 / 60))
 
-#record-btn, #stop-record-btn { padding: 0 !important; }
-.recording-row {
-  background: transparent !important;
-  border: none !important;
-  padding: 0 !important;
-}
 
-/* Style nút Record (xanh emerald) */
-#record-btn button {
-  width: 100% !important;
-  border-radius: 18px !important;
-  font-size: clamp(18px, 0.7vw + 14px, 22px) !important;
-  font-weight: 800 !important;
-  padding: clamp(16px, 1.2vw + 8px, 22px) 24px !important;
-  min-height: clamp(60px, 5vw + 30px, 76px) !important;
-  background: linear-gradient(135deg, #10B981 0%, #059669 100%) !important;
-  color: #fff !important;
-  border: none !important;
-  box-shadow: 0 4px 14px rgba(16,185,129,.30), 0 0 0 3px rgba(16,185,129,.18) !important;
-  letter-spacing: .3px !important;
-  transition: transform .15s ease, box-shadow .25s ease !important;
-}
-#record-btn button:hover {
-  transform: translateY(-1px);
-  box-shadow: 0 6px 20px rgba(16,185,129,.40), 0 0 0 4px rgba(16,185,129,.25) !important;
-}
+def _count_turns(input_dir: str, dialog_name: str) -> int:
+    try:
+        return len(parse_dialog_file(os.path.join(input_dir, dialog_name)))
+    except Exception:
+        return 0
 
-/* Style nút Stop (đỏ pulse) */
-#stop-record-btn button {
-  width: 100% !important;
-  border-radius: 18px !important;
-  font-size: clamp(18px, 0.7vw + 14px, 22px) !important;
-  font-weight: 800 !important;
-  padding: clamp(16px, 1.2vw + 8px, 22px) 24px !important;
-  min-height: clamp(60px, 5vw + 30px, 76px) !important;
-  background: linear-gradient(135deg, #DC2626 0%, #991B1B 100%) !important;
-  color: #fff !important;
-  border: none !important;
-  box-shadow: 0 4px 14px rgba(220,38,38,.35), 0 0 0 3px rgba(220,38,38,.20) !important;
-  animation: stop-pulse 1.4s ease-in-out infinite;
-}
-#stop-record-btn button:hover {
-  transform: translateY(-1px);
-  box-shadow: 0 6px 20px rgba(220,38,38,.45) !important;
-}
-@keyframes stop-pulse {
-  0%, 100% { box-shadow: 0 4px 14px rgba(220,38,38,.35), 0 0 0 0 rgba(220,38,38,.30); }
-  50%      { box-shadow: 0 4px 14px rgba(220,38,38,.35), 0 0 0 14px rgba(220,38,38,0); }
-}
 
-/* ============================================================
-   Responsive breakpoints
-   ============================================================ */
+def render_picker_html(
+    input_dir: str, output_dir: str, collab: str, filt: str
+) -> str:
+    """Build the full picker page as a single HTML string."""
+    from progress_tracking import list_partial, suggest_next
 
-/* Laptop nhỏ ≤1200px: sidebar gọn hơn */
-@media (max-width: 1200px) {
-  :root {
-    --sidebar-w: 240px;
-    --bubble-w: clamp(280px, 65%, 540px);
-  }
-  .chat-history { max-height: 380px; }
-}
+    all_dialogs = list_dialogs(input_dir)
+    done_set = {n for n in all_dialogs if is_dialog_done(n, output_dir, collab)}
+    partial = list_partial(output_dir, collab) if collab else {}
+    next_suggested = suggest_next(output_dir, collab, all_dialogs) if collab else None
 
-/* Tablet ≤900px: sidebar chuyển xuống dưới content (1 cột) */
-@media (max-width: 900px) {
-  :root {
-    --bubble-w: 78%;
-    --bubble-offset: 0px;
-  }
-  .main-screen {
-    padding-right: clamp(12px, 2vw, 24px) !important;
-  }
-  .sidebar-col {
-    position: static !important;
-    transform: none !important;
-    width: 100% !important;
-    max-width: 100% !important;
-    margin: 12px 0 !important;
-  }
-  .main-2col {
-    flex-direction: column !important;
-  }
-  .msg-row.user-side .bubble, .msg-row.assistant-side .bubble {
-    max-width: 88%;
-  }
-  .bubble.bubble-large { width: 88% !important; max-width: 88% !important; }
-  #record-btn, #mic-audio, #stop-record-btn,
-  .recording-row, .user-action-row {
-    width: 88% !important;
-    max-width: 88% !important;
-    margin-left: 0 !important;
-    margin-right: 0 !important;
-    align-self: center !important;
-  }
-  .avatar { width: 32px; height: 32px; font-size: 18px; }
-}
+    total = len(all_dialogs)
+    done_count = len(done_set)
+    todo_count = total - done_count
 
-/* Mobile ≤600px: thu gọn font, avatar, sidebar full width */
-@media (max-width: 600px) {
-  :root {
-    --bubble-w: 92%;
-  }
-  .gradio-container { padding: 6px 8px !important; }
-  .guide-box ol { padding-left: 18px; }
-  .guide-box ul { padding-left: 16px; }
-  .bubble { max-width: 92% !important; padding: 10px 12px; font-size: 15px; }
-  .bubble.bubble-large { width: 92% !important; max-width: 92% !important; padding: 12px 14px; }
-  .bubble-text { font-size: 15px; margin-bottom: 6px; }
-  .bubble-text.bubble-text-lg { font-size: 16px; }
-  .role-label { font-size: 11px; }
-  .turn-num { display: block; }
-  .avatar { width: 28px; height: 28px; font-size: 16px; }
-  .chat-history { max-height: 320px; padding: 10px 4px; }
-  .welcome-input-row { flex-direction: column !important; }
-  .welcome-input-row #ctv-name-input,
-  .welcome-input-row .huge-btn { width: 100% !important; }
-  .welcome-card h1 { font-size: 22px; }
-  .ctv-banner { font-size: 12px; padding: 6px 10px; }
-}
-"""
+    # ----- Top bar -----
+    name_label = collab or "Đặt tên"
+    top_bar = (
+        "<div class='studio-topbar'>"
+        "<div class='studio-logo'><span class='dot'></span>Studio</div>"
+        "<div class='studio-spacer'></div>"
+        f"<span class='studio-top-chip'>Tổng <b>{done_count}/{total}</b></span>"
+        f"<span class='studio-name-pill' onclick='studioPromptForName()'>👤 {name_label}</span>"
+        "</div>"
+    )
+
+    # ----- Hero CTA — only if we have a collab name and a suggestion -----
+    cta_html = ""
+    if next_suggested:
+        n = next_suggested
+        idx = all_dialogs.index(n["dialog_name"]) + 1
+        if n["kind"] == "resume":
+            title = "Thu tiếp câu kế tiếp chưa hoàn thành"
+            sub = (
+                f"Hội thoại #{idx} · dừng ở câu {n['last_recorded_turn'] + 1}"
+            )
+        else:
+            title = "Bắt đầu hội thoại tiếp theo"
+            sub = f"Hội thoại #{idx} · {_count_turns(input_dir, n['dialog_name'])} câu"
+        cta_html = (
+            "<div class='studio-cta' data-resume-cta>"
+            "<div class='icon'>▶</div>"
+            f"<div class='copy'><div class='title'>{title}</div>"
+            f"<div class='sub'>{sub}</div></div>"
+            "<button class='go-btn'>Bắt đầu →</button>"
+            "</div>"
+        )
+
+    # ----- Section + filters -----
+    filters_html = ""
+    for key, label, n in [
+        ("todo", "Chưa thu", todo_count),
+        ("done", "Đã xong", done_count),
+        ("all", "Tất cả", total),
+    ]:
+        cls = "studio-filter active" if filt == key else "studio-filter"
+        filters_html += (
+            f'<span data-filter="{key}" class="{cls}">{label} '
+            f'<span style="opacity:.7">{n}</span></span>'
+        )
+
+    section_head = (
+        "<div class='studio-section-head'>"
+        "<div>"
+        "<div class='studio-section-title'>Chọn hội thoại</div>"
+        f"<div class='studio-section-sub'>Đã xong {done_count} · Chưa thu {todo_count} · Tổng {total}</div>"
+        "</div>"
+        f"<div class='studio-filters'>{filters_html}</div>"
+        "</div>"
+    )
+
+    # ----- Grid -----
+    visible = []
+    for idx, name in enumerate(all_dialogs):
+        is_done = name in done_set
+        if filt == "todo" and is_done:
+            continue
+        if filt == "done" and not is_done:
+            continue
+        visible.append((idx, name, is_done))
+
+    if not visible:
+        if total == 0:
+            grid = (
+                "<div style='padding:40px 22px;text-align:center;color:#8f8a7a;'>"
+                "Không tìm thấy hội thoại nào trong <code>input/</code>."
+                "</div>"
+            )
+        elif filt == "todo":
+            grid = (
+                "<div style='padding:40px 22px;text-align:center;color:#8f8a7a;'>"
+                "🎉 Bạn đã thu xong tất cả các hội thoại. Cảm ơn!"
+                "</div>"
+            )
+        else:
+            grid = "<div style='padding:40px 22px;text-align:center;color:#8f8a7a;'>Trống.</div>"
+    else:
+        cards = []
+        for idx, name, is_done in visible:
+            stem = Path(name).stem
+            try:
+                dt = datetime.strptime(name[:19], "%Y-%m-%dT%H-%M-%S")
+                date_label = dt.strftime("%d/%m · %H:%M")
+            except Exception:
+                date_label = name[:10]
+            num_turns = _count_turns(input_dir, name)
+            mins = _estimate_duration_min(num_turns)
+            badge = ("<span class='badge done'>ĐÃ XONG</span>"
+                     if is_done else "<span class='badge todo'>CHƯA THU</span>")
+            # partial[stem] is last_recorded_turn (0-indexed); approximate
+            # recorded count as (last_recorded_turn + 1) when present.
+            partial_count = (partial.get(stem, -1) + 1) if stem in partial else 0
+            recorded_str = f"· {partial_count} câu thu" if partial_count else ""
+            cls = "studio-card done" if is_done else "studio-card"
+            extra_meta = (f"<span>{recorded_str.lstrip('· ')}</span>"
+                          if recorded_str else "")
+            cards.append(
+                f"<div class='{cls}' data-card-dialog='{name}'>"
+                f"<div class='head'><span class='num'>Hội thoại #{idx+1}</span>"
+                f"{badge}<span class='date'>{date_label}</span></div>"
+                f"<div class='meta'><span>💬 {num_turns} câu</span>"
+                f"<span>⏱ ~{mins} phút</span>{extra_meta}</div>"
+                "</div>"
+            )
+        grid = f"<div class='studio-grid'>{''.join(cards)}</div>"
+
+    return top_bar + cta_html + section_head + grid
+
+
+# ---------- Load static assets ----------
+with open(os.path.join(_HERE, "studio.css"), encoding="utf-8") as _f:
+    CSS = _f.read()
+
+with open(os.path.join(_HERE, "studio.js"), encoding="utf-8") as _f:
+    _STUDIO_JS = _f.read()
 
 with gr.Blocks(
-    theme=gr.themes.Soft(primary_hue="emerald", secondary_hue="blue"),
     title="Studio ghi âm trợ lý ảo",
-    css=CSS,
 ) as app:
 
-    # CTV state — giữ tên cộng tác viên qua các event
+    # ───── Top-level state ─────
+    # view: "picker" | "recording"
+    view_state = gr.State("picker")
+    # collaborator name (synced with localStorage via JS)
     collab_state = gr.State("")
+    # filter on picker page: "todo" | "done" | "all"
+    filter_state = gr.State("todo")
+    # current recording state (the dict used by all action_* fns)
     state = gr.State({})
 
-    # ───── Màn hình Welcome (mặc định hiện) ─────
-    with gr.Column(elem_classes=["welcome-screen"]) as welcome_panel:
-        gr.HTML("""
-<div class="welcome-card">
-  <div class="welcome-emoji">🎙️</div>
-  <h1 style="margin:8px 0 4px;">Studio ghi âm trợ lý ảo</h1>
-  <p style="margin:0;color:#6B7280;">Dành cho cộng tác viên thu âm phần lời của trợ lý</p>
-  <div class="welcome-divider"></div>
-  <p style="margin:8px 0 14px;font-size:17px;">
-    👋 Xin chào! Trước khi bắt đầu, vui lòng cho biết <b>tên của bạn</b>:
-  </p>
-</div>
-""")
-        with gr.Row(elem_classes=["welcome-input-row"]):
-            name_input = gr.Textbox(
-                placeholder="Ví dụ: Nguyễn Văn A",
-                show_label=False,
-                container=False,
-                elem_id="ctv-name-input",
-            )
-            enter_btn = gr.Button(
-                "Bắt đầu →",
-                variant="primary",
-                elem_classes=["huge-btn"],
-            )
-        name_error = gr.HTML(visible=False)
+    # ───── Hidden orchestration components ─────
+    # NOTE: visible=True + CSS-hidden so the DOM elements stay reachable from
+    # studio.js via document.getElementById. Gradio drops the markup entirely
+    # when visible=False, which breaks click delegation.
+    studio_action_payload = gr.Textbox(
+        elem_id="studio-action-payload",
+        elem_classes=["studio-hidden"],
+        show_label=False,
+    )
+    studio_stored_name = gr.Textbox(
+        elem_id="studio-stored-name",
+        elem_classes=["studio-hidden"],
+        show_label=False,
+    )
 
-    # ───── Màn hình Main app (mặc định ẩn) ─────
-    with gr.Column(visible=False, elem_classes=["main-screen"]) as main_panel:
-        # Header nhỏ + hiện tên CTV
-        ctv_banner = gr.HTML(
-            "<div class='ctv-banner'>👤 <b>—</b></div>"
+    # ───── Picker view (top-level Column) ─────
+    with gr.Column(visible=True, elem_classes=["studio-picker"]) as picker_view:
+        picker_html = gr.HTML(
+            "<div style='padding:40px;text-align:center;color:#8f8a7a;'>Đang tải...</div>"
         )
 
-        gr.HTML("""
-<div class="app-title">
-  <h1 style="margin:0;font-size:28px;">🎙️ Studio ghi âm trợ lý ảo</h1>
-</div>
-""")
-
-        # Hướng dẫn 4 bước — luôn hiện ở đầu, không gấp lại
-        gr.HTML("""
-<div class="guide-box">
-  <h3>📖 Bạn chỉ cần làm theo 4 bước:</h3>
-  <ol>
-    <li><b>Chọn 1 hội thoại</b> trong sidebar bên phải rồi bấm <b>▶️ Bắt đầu</b>.</li>
-    <li>App sẽ chạy tuần tự từng câu, tự dừng lại khi đến <b>câu của bạn (Trợ lý)</b>:
-      <ul style="margin:4px 0 4px 0;line-height:1.7;">
-        <li>🧑 <b>Khách hàng nói</b> — bạn chỉ lắng nghe, audio tự phát rồi tự sang câu kế.</li>
-        <li>🤖 <b>Đến lượt bạn</b> — đọc to & rõ câu trên màn hình.</li>
-      </ul>
-    </li>
-    <li><b>Ghi âm</b> qua mic của trình duyệt:
-      <ul style="margin:4px 0 4px 0;line-height:1.7;">
-        <li>Bấm <b>🎤 nút mic</b> trong khung audio để bắt đầu thu.</li>
-        <li>Đọc xong, bấm nút lớn màu đỏ <b>🛑 KẾT THÚC GHI ÂM</b> bên dưới để dừng.</li>
-        <li>(Lần đầu trình duyệt sẽ hỏi cấp quyền dùng micro — chọn <i>Allow</i>.)</li>
-      </ul>
-    </li>
-    <li><b>Nghe lại</b> bản ghi: ưng → <b>💾 Lưu & Sang câu tiếp</b>; chưa ưng → <b>🔄 Ghi lại</b>.</li>
-  </ol>
-</div>
-""")
-
-        # Layout 2 cột: trái = khu làm việc, phải = sidebar chọn hội thoại
-        with gr.Row(elem_classes=["main-2col"]):
-
-            # ═══════════ CỘT TRÁI — khu làm việc chính ═══════════
-            with gr.Column(scale=3, elem_classes=["main-work-col"]):
-                progress_box = gr.HTML(value=progress_html(0, 1))
-
-                # Chat lịch sử — chỉ các câu ĐÃ XONG
-                chat_box = gr.HTML(value=build_chat_html({}))
-
-                # Thẻ câu hiện tại
-                current_card = gr.HTML(value=build_current_card_html({}))
-
-                # NOTE: tất cả panel init visible=True để mount DOM,
-                # app.load() ẩn lại về trạng thái mặc định.
-
-                with gr.Column(visible=True, elem_classes=["user-action-row"]) as user_panel:
-                    user_audio = gr.Audio(
-                        label="🔊 Đang phát audio khách hàng",
-                        autoplay=True,
-                        interactive=False,
-                        elem_id="user-audio-player",
-                    )
-                    next_btn = gr.Button(
-                        "▶️ Sang câu tiếp",
-                        variant="secondary",
-                        elem_classes=["big-btn"],
-                    )
-
-                # Micro client (browser) qua gr.Audio — dùng được với gradio.live.
-                # CTV bấm nút "Record" sẵn có trong component để bắt đầu.
-                # KHÔNG bật show_recording_waveform vì canvas rendering có thể gây lag.
-                mic_audio = gr.Audio(
-                    sources=["microphone"],
-                    type="filepath",  # Gradio save trực tiếp ra temp file
-                                       # → nhanh hơn việc convert sang numpy
-                    label="🎤 Bấm nút mic để ghi âm",
-                    interactive=True,
-                    elem_id="mic-audio",
-                    elem_classes=["mic-audio"],
-                    visible=True,
-                    format="wav",
-                )
-
-                # Nút lớn "Kết thúc" hiện sau khi CTV bắt đầu ghi —
-                # gọi JS click lên nút dừng built-in của gr.Audio.
-                stop_record_btn = gr.Button(
-                    "🛑 KẾT THÚC GHI ÂM",
-                    variant="stop",
-                    visible=False,
-                    elem_classes=["huge-btn"],
-                    elem_id="stop-record-btn",
-                )
-
-                with gr.Column(visible=True, elem_classes=["recording-row"]) as recording_panel:
-                    # rec_status nhận HTML có sẵn <audio> tag bên trong
-                    # → không cần thêm gr.Audio component nữa
-                    rec_status = gr.HTML()
-                    # rec_audio giữ lại để tương thích outputs cũ (luôn ẩn)
-                    rec_audio = gr.Audio(
-                        label="🎧 Nghe lại bản ghi của bạn",
-                        interactive=False,
-                        type="filepath",
-                        visible=False,
-                    )
-                    with gr.Row():
-                        rerec_btn = gr.Button(
-                            "🔄 Ghi lại", elem_classes=["big-btn"]
-                        )
-                        save_btn = gr.Button(
-                            "💾 Lưu & Sang câu tiếp",
-                            variant="primary",
-                            elem_classes=["big-btn"],
-                        )
-
-                future_indicator = gr.HTML(value="")
-
-                with gr.Column(visible=True) as done_panel:
-                    finish_msg = gr.Markdown()
-                    finish_btn = gr.Button(
-                        "📦 Hoàn tất & Xuất kết quả",
-                        variant="primary",
-                        elem_classes=["huge-btn"],
-                    )
-
-            # ═══════════ CỘT PHẢI — sidebar chọn hội thoại + config ═══════════
-            with gr.Column(scale=1, min_width=280, elem_classes=["sidebar-col"]):
-                gr.HTML(
-                    "<div class='sidebar-header'>📋 Chọn hội thoại</div>"
-                )
-                dialog_dropdown = gr.Dropdown(
-                    label="Hội thoại",
-                    choices=build_dropdown_choices(DEFAULT_INPUT_DIR, DEFAULT_OUTPUT_DIR, True),
-                    interactive=True,
-                    elem_id="dialog-dropdown",
-                )
-                load_btn = gr.Button(
-                    "▶️ Bắt đầu",
-                    variant="primary",
-                    elem_classes=["big-btn"],
-                )
-                hide_done_chk = gr.Checkbox(
-                    label="Chỉ hiện chưa thu âm",
-                    value=True,
-                )
-                refresh_btn = gr.Button("🔄 Quét lại", size="sm")
-
-                with gr.Accordion(
-                    "⚙️ Cấu hình nâng cao", open=False,
-                    elem_classes=["sidebar-accordion"],
-                ):
-                    input_dir = gr.Textbox(
-                        label="📂 Thư mục hội thoại",
-                        value=DEFAULT_INPUT_DIR,
-                    )
-                    output_dir = gr.Textbox(
-                        label="💾 Thư mục output",
-                        value=DEFAULT_OUTPUT_DIR,
-                    )
-
-
-    main_outputs = [
-        state,             # 0
-        progress_box,      # 1  HTML
-        chat_box,          # 2  HTML  past turns
-        current_card,      # 3  HTML  current turn bubble
-        user_panel,        # 4  Column visibility
-        user_audio,        # 5  Audio value
-        mic_audio,         # 6  gr.Audio — micro client để CTV ghi âm
-        recording_panel,   # 7  Column visibility
-        rec_status,        # 8  HTML value
-        rec_audio,         # 9  Audio value
-        future_indicator,  # 10 HTML value
-        done_panel,        # 11 Column visibility
-        finish_msg,        # 12 Markdown value
-        stop_record_btn,   # 13 Button visibility (kết thúc ghi âm)
-    ]
-
-    def _refresh(in_dir, out_dir, hide_done, collab):
-        return gr.update(
-            choices=build_dropdown_choices(in_dir, out_dir, hide_done, collab),
-            value=None,
+    # ───── Recording view (hidden until user picks) ─────
+    with gr.Column(visible=False, elem_classes=["studio-recording"]) as recording_view:
+        recording_html = gr.HTML("")
+        # The mic Audio component — kept as the only "real" Gradio input.
+        # CSS minimises its chrome; clicks come from the rendered HTML.
+        mic_audio = gr.Audio(
+            sources=["microphone"],
+            type="filepath",
+            interactive=True,
+            elem_id="mic-audio",
+            visible=True,
+            format="wav",
+            show_label=False,
+            buttons=[],
+            waveform_options={"show_recording_waveform": False},
         )
 
-    refresh_btn.click(
-        fn=_refresh,
-        inputs=[input_dir, output_dir, hide_done_chk, collab_state],
-        outputs=[dialog_dropdown],
-    )
-    hide_done_chk.change(
-        fn=_refresh,
-        inputs=[input_dir, output_dir, hide_done_chk, collab_state],
-        outputs=[dialog_dropdown],
-    )
-    input_dir.submit(
-        fn=_refresh,
-        inputs=[input_dir, output_dir, hide_done_chk, collab_state],
-        outputs=[dialog_dropdown],
-    )
-    output_dir.submit(
-        fn=_refresh,
-        inputs=[input_dir, output_dir, hide_done_chk, collab_state],
-        outputs=[dialog_dropdown],
-    )
+    def _skip_recorded_assistant(st: dict) -> dict:
+        """Skip past assistant turns that already have a recording.
 
-    SCROLL_TO_CURRENT_JS = """
-    () => {
-      setTimeout(() => {
-        const el = document.querySelector('.chat-history .bubble.current');
-        if (el) el.scrollIntoView({behavior: 'smooth', block: 'center'});
-      }, 120);
-    }
-    """
+        After re-recording an earlier turn and advancing forward, the user can
+        otherwise get parked on a turn they've already recorded (e.g. recorded
+        turns 1+3, came back to redo 1, after saving the next assistant turn
+        is 3 — but they don't want to redo 3). Walk forward until we hit an
+        un-recorded assistant turn, a user turn (always re-playable), or the
+        end of the dialog.
+        """
+        dialog = st.get("dialog", [])
+        recordings = st.get("recordings", {})
+        idx = st.get("current_turn", 0)
+        while idx < len(dialog):
+            turn = dialog[idx]
+            if turn["role"] == "assistant" and idx in recordings:
+                idx += 1
+            else:
+                break
+        st["current_turn"] = idx
+        return st
 
-    # ───── Welcome → Main app: validate tên rồi chuyển màn hình ─────
-    def enter_app(name: str):
-        clean = sanitize_collaborator_name(name)
-        if not clean:
-            return (
-                gr.update(visible=True, value=(
-                    "<div style='color:#dc2626;padding:8px 0;font-weight:600;'>"
-                    "⚠️ Vui lòng nhập tên của bạn trước khi bắt đầu."
-                    "</div>"
-                )),
-                gr.update(visible=True),    # welcome stays
-                gr.update(visible=False),   # main hidden
-                "",                          # collab_state empty
-                gr.update(),                 # ctv_banner unchanged
-                gr.update(),                 # dialog_dropdown unchanged
+    # ───── Dispatcher (single Python entry point for all dynamic JS actions) ─────
+    def studio_dispatch(payload_json: str, view: str, collab: str, filt: str, st: dict):
+        """Single Python entry point fired by studio.js for every dynamic action.
+
+        Reads the JSON payload, dispatches to the right sub-handler, returns
+        a tuple of all outputs (view_state, collab_state, filter_state, state,
+        picker_html, recording_html, mic_audio, picker_view, recording_view).
+        """
+        import json as _json
+        try:
+            msg = _json.loads(payload_json or "{}")
+        except Exception:
+            msg = {}
+        action = msg.get("action")
+        data = msg.get("data", {})
+        print(f"[dispatch] action={action} data={data}")
+
+        if action == "set_name":
+            collab = sanitize_collaborator_name(data.get("name", ""))
+        elif action == "set_filter":
+            new = data.get("filter")
+            if new in ("todo", "done", "all"):
+                filt = new
+        elif action == "open_conversation":
+            new_st = load_conversation_state(
+                DEFAULT_INPUT_DIR, data.get("dialog", ""),
+                DEFAULT_OUTPUT_DIR, collab,
             )
+            if new_st and new_st.get("dialog"):
+                st = new_st
+                view = "recording"
+        elif action == "resume_next":
+            if collab:
+                from progress_tracking import suggest_next
+                all_d = list_dialogs(DEFAULT_INPUT_DIR)
+                s = suggest_next(DEFAULT_OUTPUT_DIR, collab, all_d)
+                if s:
+                    resume_at = (s["last_recorded_turn"] + 1) if s["kind"] == "resume" else 0
+                    new_st = load_conversation_state(
+                        DEFAULT_INPUT_DIR, s["dialog_name"],
+                        DEFAULT_OUTPUT_DIR, collab,
+                        resume_at=resume_at,
+                    )
+                    if new_st and new_st.get("dialog"):
+                        st = new_st
+                        view = "recording"
+        elif action == "back_to_picker":
+            view = "picker"
+        elif action == "save_and_next":
+            st = dict(st or {})
+            st["current_turn"] = st.get("current_turn", 0) + 1
+            st["rec_phase"] = "idle"
+            st = _skip_recorded_assistant(st)
+        elif action == "jump_to":
+            # User clicked a "Chưa thu" row in the rail — go straight to that
+            # turn. Honest jump: no skipping, no auto-advance. Works for any
+            # idx in range (assistant or user), so it could be reused later
+            # for arbitrary navigation.
+            target = data.get("idx")
+            if target is not None and st and st.get("dialog"):
+                idx2 = max(0, min(int(target), len(st["dialog"]) - 1))
+                st = dict(st)
+                st["current_turn"] = idx2
+                st["rec_phase"] = "idle"
+        elif action == "rerecord_last":
+            st = dict(st or {})
+            # Rail's "Thu lại" passes data.idx (most-recent-recorded turn);
+            # hero's "Thu lại" in preview phase passes no idx (means "redo
+            # the take I just made", i.e. current_turn).
+            target = data.get("idx")
+            idx2 = int(target) if target is not None else st.get("current_turn", 0)
+            recs = dict(st.get("recordings", {}))
+            recs.pop(idx2, None)
+            st["recordings"] = recs
+            st["current_turn"] = idx2  # jump back so hero shows that turn
+            st["rec_phase"] = "idle"
+        elif action == "skip_user":
+            st = dict(st or {})
+            st["current_turn"] = st.get("current_turn", 0) + 1
+            st = _skip_recorded_assistant(st)
+        elif action == "play_user_audio":
+            st = dict(st or {})
+            st["_play_request"] = ("user", int(data.get("idx", 0)))
+        elif action == "play_assistant_audio":
+            st = dict(st or {})
+            st["_play_request"] = ("assistant", int(data.get("idx", 0)))
+        elif action == "play_all":
+            # Mark state so render_recording_html can build the full playlist
+            # of data-URLs and inject a one-shot JS trigger to play them in
+            # sequence client-side.
+            st = dict(st or {})
+            st["_playlist_request"] = True
+        elif action == "finish":
+            try:
+                action_finish(st)
+            except Exception as exc:
+                print(f"[finish] {exc}")
+            view = "picker"
+            st = {}
+        elif action == "kbd_enter":
+            # Save & next, only valid in preview phase
+            if st.get("rec_phase") == "preview":
+                st = dict(st)
+                st["current_turn"] = st.get("current_turn", 0) + 1
+                st["rec_phase"] = "idle"
+                st = _skip_recorded_assistant(st)
+        elif action == "kbd_rerec":
+            # Re-record current turn, only valid in preview phase
+            if st.get("rec_phase") == "preview":
+                st = dict(st)
+                idx2 = st.get("current_turn", 0)
+                recs = dict(st.get("recordings", {}))
+                recs.pop(idx2, None)
+                st["recordings"] = recs
+                st["rec_phase"] = "idle"
+        elif action == "kbd_skip":
+            # Skip the current user turn (no-op on assistant turns)
+            if st and st.get("dialog"):
+                idx2 = st.get("current_turn", 0)
+                if idx2 < len(st["dialog"]) and st["dialog"][idx2]["role"] == "user":
+                    st = dict(st)
+                    st["current_turn"] = idx2 + 1
+                    st = _skip_recorded_assistant(st)
+        elif action == "kbd_back":
+            view = "picker"
+        elif action == "kbd_space":
+            # Space is context-sensitive — handled client-side in studio.js
+            # by clicking the right visible button. No Python action needed;
+            # this branch exists just to swallow the action.
+            pass
+
+        # Re-render whichever view is active
+        picker_update = (
+            gr.update(value=render_picker_html(
+                DEFAULT_INPUT_DIR, DEFAULT_OUTPUT_DIR, collab, filt
+            ))
+            if view == "picker" else gr.update()
+        )
+        recording_update = (
+            gr.update(value=render_recording_html(st, collab))
+            if view == "recording" else gr.update()
+        )
+
+        # Reset mic_audio whenever the turn changes (so the previous take
+        # is cleared from the component and the record button reappears).
+        # Don't reset on view-switching actions (open_conversation,
+        # resume_next, back_to_picker, finish) — those mount/unmount the
+        # recording view, so the component is already in its fresh state and
+        # an extra value=None update can leave it in a transient state where
+        # the record-button briefly isn't in the DOM.
+        mic_reset_actions = {
+            "save_and_next", "rerecord_last", "skip_user", "jump_to",
+            "kbd_enter", "kbd_rerec", "kbd_skip",
+        }
+        mic_update = (
+            gr.update(value=None) if action in mic_reset_actions else gr.update()
+        )
+
         return (
-            gr.update(visible=False, value=""),  # clear error
-            gr.update(visible=False),             # hide welcome
-            gr.update(visible=True),              # show main
-            clean,                                 # save name
-            gr.update(value=(
-                f"<div class='ctv-banner'>👤 Đang đăng nhập với tên: <b>{clean}</b></div>"
-            )),
-            gr.update(
-                choices=build_dropdown_choices(
-                    DEFAULT_INPUT_DIR, DEFAULT_OUTPUT_DIR, True, clean
-                ),
-                value=None,
-            ),
+            view, collab, filt, st,
+            picker_update,
+            recording_update,
+            mic_update,
+            gr.update(visible=(view == "picker")),
+            gr.update(visible=(view == "recording")),
         )
 
-    enter_btn.click(
-        fn=enter_app,
-        inputs=[name_input],
+    # Fire dispatcher on textbox change — every dispatchAction() write to
+    # studio-action-payload includes a fresh nonce so the value always changes.
+    # This is more reliable than clicking a hidden button (Gradio's button
+    # markup can lose its elem_id in some 6.x renderings).
+    studio_action_payload.change(
+        fn=studio_dispatch,
+        inputs=[studio_action_payload, view_state, collab_state, filter_state, state],
         outputs=[
-            name_error, welcome_panel, main_panel,
-            collab_state, ctv_banner, dialog_dropdown,
+            view_state, collab_state, filter_state, state,
+            picker_html, recording_html, mic_audio,
+            picker_view, recording_view,
         ],
-    )
-    # Bấm Enter trong textbox cũng tương đương click
-    name_input.submit(
-        fn=enter_app,
-        inputs=[name_input],
-        outputs=[
-            name_error, welcome_panel, main_panel,
-            collab_state, ctv_banner, dialog_dropdown,
-        ],
+        show_progress="hidden",
     )
 
-    load_btn.click(
-        fn=action_load,
-        inputs=[input_dir, dialog_dropdown, output_dir, collab_state],
-        outputs=main_outputs,
-        show_progress="hidden",
-    ).then(fn=None, js=SCROLL_TO_CURRENT_JS)
-    next_btn.click(
-        fn=action_next, inputs=[state], outputs=main_outputs,
-        show_progress="hidden",
-    ).then(fn=None, js=SCROLL_TO_CURRENT_JS)
-    user_audio.stop(
-        fn=action_next, inputs=[state], outputs=main_outputs,
-        show_progress="hidden",
-    ).then(fn=None, js=SCROLL_TO_CURRENT_JS)
-    # Khi CTV bắt đầu ghi → hiện nút "Kết thúc ghi âm" lớn
-    def _on_mic_start():
-        print("[mic] start_recording event fired")
-        return gr.update(visible=True)
+    # ───── Mic event wirings ─────
+    def _on_mic_start(st: dict, collab: str):
+        st = dict(st or {})
+        st["rec_phase"] = "recording"
+        return st, gr.update(value=render_recording_html(st, collab))
 
     mic_audio.start_recording(
         fn=_on_mic_start,
-        outputs=[stop_record_btn],
+        inputs=[state, collab_state],
+        outputs=[state, recording_html],
+        show_progress="hidden",
     )
 
-    # Nút "Kết thúc ghi âm" → JS click trực tiếp nút dừng built-in của gr.Audio.
-    # Việc click đó kích hoạt mic_audio.stop_recording → action_recording_done.
-    STOP_RECORDING_JS = """
-    () => {
-      const root = document.querySelector('#mic-audio');
-      if (!root) return;
-      // Tìm nút stop của gr.Audio (Gradio đổi tên class qua các version)
-      const candidates = root.querySelectorAll(
-        'button.stop-button, button[aria-label*="Stop"], ' +
-        'button[aria-label*="stop"], button[aria-label*="dừng"], ' +
-        'button[title*="Stop"], button.icon-button'
-      );
-      for (const b of candidates) {
-        const rect = b.getBoundingClientRect();
-        if (rect.width > 0 && rect.height > 0) {
-          b.click();
-          return;
-        }
-      }
-    }
-    """
-    stop_record_btn.click(fn=None, js=STOP_RECORDING_JS)
+    def _on_mic_stop(st: dict, mic_value, collab: str):
+        """Audio recorded → save file, store, switch to preview phase."""
+        if mic_value is None or not isinstance(mic_value, str) or not os.path.exists(mic_value):
+            st = dict(st or {})
+            st["rec_phase"] = "idle"
+            return st, gr.update(value=render_recording_html(st, collab))
 
-    # CTV bấm dừng (qua nút lớn hoặc nút built-in) → xử lý audio đã ghi
-    # show_progress="hidden" → tắt overlay "processing" trên rec_status
-    # (overlay đôi khi không clear gây UX rối; xử lý server-side đã rất nhanh)
+        try:
+            audio, sr = sf.read(mic_value, dtype="float32")
+            if audio.ndim > 1:
+                audio = audio.mean(axis=1)
+            audio_int16 = np.clip(audio * 32767.0, -32768, 32767).astype(np.int16)
+            idx2 = st["current_turn"]
+            out_dir = st["output_dir"]
+            os.makedirs(out_dir, exist_ok=True)
+            final_path = os.path.realpath(
+                os.path.join(out_dir, f"turn_{idx2:02d}_assistant.wav")
+            )
+            sf.write(final_path, audio_int16, sr)
+        except Exception as exc:
+            # Any failure in the read/process/write pipeline leaves no usable
+            # recording. Reset to idle so the user can try again.
+            print(f"[mic_stop] save failed: {exc}")
+            st = dict(st or {})
+            st["rec_phase"] = "idle"
+            return st, gr.update(value=render_recording_html(st, collab))
+
+        st = dict(st)
+        recs = dict(st.get("recordings", {}))
+        recs[idx2] = final_path
+        st["recordings"] = recs
+        st["rec_phase"] = "preview"
+
+        # Write partial progress
+        try:
+            from progress_tracking import write_progress
+            write_progress(
+                st["output_dir"],
+                last_recorded_turn=idx2,
+                recorded_count=len(st["recordings"]),
+            )
+        except Exception as exc:
+            print(f"[progress] write failed: {exc}")
+
+        return st, gr.update(value=render_recording_html(st, collab))
+
     mic_audio.stop_recording(
-        fn=action_recording_done,
-        inputs=[state, mic_audio],
-        outputs=main_outputs,
+        fn=_on_mic_stop,
+        inputs=[state, mic_audio, collab_state],
+        outputs=[state, recording_html],
         show_progress="hidden",
-    )
-    rerec_btn.click(
-        fn=action_rerecord, inputs=[state], outputs=main_outputs,
-        show_progress="hidden",
-    )
-    save_btn.click(
-        fn=action_save_continue, inputs=[state], outputs=main_outputs,
-        show_progress="hidden",
-    ).then(fn=None, js=SCROLL_TO_CURRENT_JS)
-    finish_btn.click(
-        fn=action_finish, inputs=[state], outputs=[finish_msg],
-        show_progress="hidden",
-    ).then(
-        fn=_refresh,
-        inputs=[input_dir, output_dir, hide_done_chk, collab_state],
-        outputs=[dialog_dropdown],
     )
 
-    # Khi trang load lần đầu → ẩn các panel/button đang init visible=True
-    # về trạng thái mặc định.
-    app.load(fn=lambda: _render({}), inputs=None, outputs=main_outputs)
+    # ───── Initial render ─────
+    def _initial_render():
+        return gr.update(value=render_picker_html(
+            DEFAULT_INPUT_DIR, DEFAULT_OUTPUT_DIR, "", "todo"
+        ))
+    app.load(fn=_initial_render, inputs=None, outputs=[picker_html])
 
 
 if __name__ == "__main__":
@@ -1859,6 +1393,9 @@ if __name__ == "__main__":
         server_port=int(os.environ.get("PORT", 7860)),
         share=share,
         show_error=True,
+        theme=gr.themes.Soft(),
+        css=CSS,
+        head=f"<script>\n{_STUDIO_JS}\n</script>",
         allowed_paths=[
             os.path.realpath(os.path.join(here, "output")),
             os.path.realpath(os.path.join(here, "input")),
