@@ -30,14 +30,11 @@ import soundfile as sf
 
 from recording_backend import (
     SAMPLE_RATE,
-    VAD_CHUNK,
-    VAD_MODEL,
     parse_dialog_file,
     list_dialogs,
     sanitize_collaborator_name,
     session_output_dir,
     is_dialog_done,
-    friendly_dialog_label,
     build_dropdown_choices,
     trim_silences,
     segment_user_turns,
