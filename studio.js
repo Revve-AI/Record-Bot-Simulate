@@ -23,11 +23,13 @@
     }
     const input = root.querySelector("input, textarea");
     if (!input) return false;
-    const nativeSetter = Object.getOwnPropertyDescriptor(
-      window.HTMLInputElement.prototype, "value"
-    )?.set || Object.getOwnPropertyDescriptor(
-      window.HTMLTextAreaElement.prototype, "value"
-    ).set;
+    // Pick the native value setter that matches THIS element's prototype.
+    // Calling the HTMLInputElement setter on a <textarea> (or vice versa)
+    // throws "Illegal invocation".
+    const proto = input.tagName === "TEXTAREA"
+      ? window.HTMLTextAreaElement.prototype
+      : window.HTMLInputElement.prototype;
+    const nativeSetter = Object.getOwnPropertyDescriptor(proto, "value").set;
     nativeSetter.call(input, value);
     input.dispatchEvent(new Event("input", { bubbles: true }));
     return true;
@@ -41,6 +43,28 @@
     }
     const btn = root.querySelector("button");
     if (btn) btn.click();
+  }
+
+  // Wait for a Gradio-rendered element to appear. Gradio hydrates components
+  // asynchronously after DOMContentLoaded, so studio.js can be ready before the
+  // orchestration components exist.
+  function waitFor(elemId, timeoutMs = 8000) {
+    return new Promise((resolve) => {
+      const found = document.getElementById(elemId);
+      if (found) return resolve(found);
+      const start = Date.now();
+      const obs = new MutationObserver(() => {
+        const el = document.getElementById(elemId);
+        if (el) {
+          obs.disconnect();
+          resolve(el);
+        } else if (Date.now() - start > timeoutMs) {
+          obs.disconnect();
+          resolve(null);
+        }
+      });
+      obs.observe(document.body, { childList: true, subtree: true });
+    });
   }
 
   function dispatchAction(action, data) {
@@ -167,19 +191,20 @@
   }
 
   // ----- localStorage name ------
-  function loadStoredName() {
-    try {
-      const name = localStorage.getItem(LOCAL_STORAGE_NAME_KEY);
-      if (name) {
-        setHiddenTextbox("studio-stored-name", name);
-        // Fire the load-name action so Python knows we have a name
-        setTimeout(() => {
-          dispatchAction("set_name", { name });
-        }, 80);
-      }
-    } catch (e) {
-      console.warn("[studio.js] localStorage blocked:", e);
+  async function loadStoredName() {
+    let name = null;
+    try { name = localStorage.getItem(LOCAL_STORAGE_NAME_KEY); }
+    catch (e) { console.warn("[studio.js] localStorage blocked:", e); return; }
+    if (!name) return;
+    // Wait until the orchestration components are in the DOM. Gradio hydrates
+    // them asynchronously after DOMContentLoaded.
+    const ready = await waitFor("studio-action-payload");
+    if (!ready) {
+      console.warn("[studio.js] payload never appeared; skipping set_name");
+      return;
     }
+    setHiddenTextbox("studio-stored-name", name);
+    dispatchAction("set_name", { name });
   }
 
   function persistName(name) {
@@ -205,6 +230,8 @@
   function boot() {
     installClickDelegate();
     installKeyboardShortcuts();
+    // loadStoredName waits internally for the Gradio components to appear,
+    // so we don't block boot here.
     loadStoredName();
     console.log("[studio.js] ready");
   }
