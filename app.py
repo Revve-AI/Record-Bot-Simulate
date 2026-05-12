@@ -1139,22 +1139,23 @@ with gr.Blocks(
 
         try:
             audio, sr = sf.read(mic_value, dtype="float32")
+            if audio.ndim > 1:
+                audio = audio.mean(axis=1)
+            audio_int16 = np.clip(audio * 32767.0, -32768, 32767).astype(np.int16)
+            idx2 = st["current_turn"]
+            out_dir = st["output_dir"]
+            os.makedirs(out_dir, exist_ok=True)
+            final_path = os.path.realpath(
+                os.path.join(out_dir, f"turn_{idx2:02d}_assistant.wav")
+            )
+            sf.write(final_path, audio_int16, sr)
         except Exception as exc:
-            print(f"[mic_stop] sf.read failed: {exc}")
+            # Any failure in the read/process/write pipeline leaves no usable
+            # recording. Reset to idle so the user can try again.
+            print(f"[mic_stop] save failed: {exc}")
             st = dict(st or {})
             st["rec_phase"] = "idle"
             return st, gr.update(value=render_recording_html(st, collab))
-
-        if audio.ndim > 1:
-            audio = audio.mean(axis=1)
-        audio_int16 = np.clip(audio * 32767.0, -32768, 32767).astype(np.int16)
-        idx2 = st["current_turn"]
-        out_dir = st["output_dir"]
-        os.makedirs(out_dir, exist_ok=True)
-        final_path = os.path.realpath(
-            os.path.join(out_dir, f"turn_{idx2:02d}_assistant.wav")
-        )
-        sf.write(final_path, audio_int16, sr)
 
         st = dict(st)
         recs = dict(st.get("recordings", {}))
