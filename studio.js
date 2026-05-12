@@ -179,6 +179,10 @@
     try { localStorage.setItem(LOCAL_STORAGE_NAME_KEY, name); } catch (_) {}
   }
 
+  window.__studioAutoNext = function () {
+    setTimeout(() => dispatchAction("save_and_next", {}), 600);
+  };
+
   // Expose for inline onclick on the name pill
   window.studioPromptForName = function () {
     const current = localStorage.getItem(LOCAL_STORAGE_NAME_KEY) || "";

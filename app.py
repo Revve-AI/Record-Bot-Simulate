@@ -632,6 +632,7 @@ def load_conversation_state(input_dir: str, dialog_name: str,
         "user_audio_per_turn": user_audio_per_turn,
         "recordings": {},
         "current_turn": resume_at if resume_at is not None else 0,
+        "rec_phase": "idle",
     }
 
 
@@ -694,24 +695,65 @@ def _render_rail(st: dict) -> str:
 
 
 def _render_hero(st: dict) -> str:
-    """Minimal hero — Task 10 fills in all 4 states."""
     dialog = st.get("dialog", [])
     idx = st.get("current_turn", 0)
     if not dialog or idx >= len(dialog):
+        # Completion state
         return (
             "<span class='hero-role-tag'>🎉 Hoàn thành</span>"
-            f"<div class='hero-turn-card'>Bạn đã thu xong {len(dialog)} câu.</div>"
+            f"<div class='hero-turn-card'>Bạn đã thu xong <b>{len(dialog)} câu</b> của hội thoại này.</div>"
+            "<button class='hero-btn primary' data-finish>📦 Hoàn tất & về danh sách</button>"
         )
+
     turn = dialog[idx]
     if turn["role"] == "user":
+        # Auto-playing user turn — embed an <audio> element with data URL
+        url = audio_to_data_url(get_trimmed_user_audio(st, idx))
+        audio_tag = (
+            f"<audio autoplay onended=\"window.__studioAutoNext && window.__studioAutoNext()\" "
+            f"src=\"{url}\" style=\"display:none\"></audio>" if url else ""
+        )
         return (
             "<span class='hero-role-tag'>Khách đang nói</span>"
             f"<div class='hero-turn-card'>{turn['text']}</div>"
+            f"{audio_tag}"
             "<div class='hero-hint'>⏳ Tự sang câu kế khi nghe xong</div>"
             "<button class='hero-btn skip' data-skip-user>Bỏ qua câu này →</button>"
         )
+
+    # Assistant turn — phase-dependent
+    phase = st.get("rec_phase", "idle")
+    if phase == "recording":
+        bar_heights = [18, 30, 14, 38, 26, 42, 18, 32, 22, 36, 14, 28, 40, 20, 34]
+        bars_html = "".join(
+            f"<div class='bar' style='height:{h}px'></div>" for h in bar_heights
+        )
+        return (
+            "<span class='hero-role-tag' style='background:var(--brand);color:#fff'>● ĐANG GHI ÂM</span>"
+            f"<div class='hero-turn-card recording'>{turn['text']}</div>"
+            "<div class='hero-timer'>0:00</div>"
+            f"<div class='hero-waveform'>{bars_html}</div>"
+            "<button class='hero-rec-btn stop' data-rec-stop><span class='inner'></span></button>"
+            "<div class='hero-hint'>Bấm để <b>kết thúc</b> · hoặc <span class='hero-kbd'>Space</span> · tự dừng khi im lặng 1.5s</div>"
+        )
+    elif phase == "preview":
+        return (
+            "<span class='hero-role-tag'>✅ Đã thu xong — nghe lại</span>"
+            f"<div class='hero-turn-card'>{turn['text']}</div>"
+            "<div class='hero-audio-bar'>"
+            f"<button class='play-circle' data-play-assistant='{idx}'>▶</button>"
+            "<div class='scrub'><div></div></div>"
+            "<span>0:00</span>"
+            "</div>"
+            "<div class='hero-actions'>"
+            "<button class='hero-btn secondary' data-rerec>↻ Thu lại</button>"
+            "<button class='hero-btn primary' data-save-next>💾 Lưu & câu kế →</button>"
+            "</div>"
+            "<div class='hero-hint'><span class='hero-kbd'>Enter</span> để lưu · <span class='hero-kbd'>R</span> để thu lại</div>"
+        )
+    # idle
     return (
-        "<span class='hero-role-tag'>Đến lượt bạn</span>"
+        "<span class='hero-role-tag'>Đến lượt bạn — đọc câu này</span>"
         f"<div class='hero-turn-card'>{turn['text']}</div>"
         "<button class='hero-rec-btn' data-rec-start><span class='inner'></span></button>"
         "<div class='hero-hint'><b>Bấm để ghi âm</b> · hoặc <span class='hero-kbd'>Space</span></div>"
@@ -749,7 +791,20 @@ def render_recording_html(st: dict, collab: str) -> str:
         f"<div class='studio-rec-hero'>{_render_hero(st)}</div>"
         "</div>"
     )
-    return top_bar + progress + shell
+
+    # Inject on-demand playback (set by play_user_audio / play_assistant_audio actions)
+    play_req = st.pop("_play_request", None)
+    play_tag = ""
+    if play_req:
+        kind, ridx = play_req
+        if kind == "user":
+            url = audio_to_data_url(get_trimmed_user_audio(st, ridx))
+        else:
+            url = audio_to_data_url(st.get("recordings", {}).get(ridx))
+        if url:
+            play_tag = f"<audio autoplay src='{url}' style='display:none'></audio>"
+
+    return top_bar + progress + shell + play_tag
 
 
 def _estimate_duration_min(num_turns: int) -> int:
@@ -1002,6 +1057,33 @@ with gr.Blocks(
                         view = "recording"
         elif action == "back_to_picker":
             view = "picker"
+        elif action == "save_and_next":
+            st = dict(st or {})
+            st["current_turn"] = st.get("current_turn", 0) + 1
+            st["rec_phase"] = "idle"
+        elif action == "rerecord_last":
+            st = dict(st or {})
+            idx2 = st.get("current_turn", 0)
+            recs = dict(st.get("recordings", {}))
+            recs.pop(idx2, None)
+            st["recordings"] = recs
+            st["rec_phase"] = "idle"
+        elif action == "skip_user":
+            st = dict(st or {})
+            st["current_turn"] = st.get("current_turn", 0) + 1
+        elif action == "play_user_audio":
+            st = dict(st or {})
+            st["_play_request"] = ("user", int(data.get("idx", 0)))
+        elif action == "play_assistant_audio":
+            st = dict(st or {})
+            st["_play_request"] = ("assistant", int(data.get("idx", 0)))
+        elif action == "finish":
+            try:
+                action_finish(st)
+            except Exception as exc:
+                print(f"[finish] {exc}")
+            view = "picker"
+            st = {}
 
         # Re-render whichever view is active
         picker_update = (
@@ -1032,6 +1114,71 @@ with gr.Blocks(
             picker_html, recording_html, mic_audio,
             picker_view, recording_view,
         ],
+        show_progress="hidden",
+    )
+
+    # ───── Mic event wirings ─────
+    def _on_mic_start(st: dict, collab: str):
+        st = dict(st or {})
+        st["rec_phase"] = "recording"
+        return st, gr.update(value=render_recording_html(st, collab))
+
+    mic_audio.start_recording(
+        fn=_on_mic_start,
+        inputs=[state, collab_state],
+        outputs=[state, recording_html],
+        show_progress="hidden",
+    )
+
+    def _on_mic_stop(st: dict, mic_value, collab: str):
+        """Audio recorded → save file, store, switch to preview phase."""
+        if mic_value is None or not isinstance(mic_value, str) or not os.path.exists(mic_value):
+            st = dict(st or {})
+            st["rec_phase"] = "idle"
+            return st, gr.update(value=render_recording_html(st, collab))
+
+        try:
+            audio, sr = sf.read(mic_value, dtype="float32")
+        except Exception as exc:
+            print(f"[mic_stop] sf.read failed: {exc}")
+            st = dict(st or {})
+            st["rec_phase"] = "idle"
+            return st, gr.update(value=render_recording_html(st, collab))
+
+        if audio.ndim > 1:
+            audio = audio.mean(axis=1)
+        audio_int16 = np.clip(audio * 32767.0, -32768, 32767).astype(np.int16)
+        idx2 = st["current_turn"]
+        out_dir = st["output_dir"]
+        os.makedirs(out_dir, exist_ok=True)
+        final_path = os.path.realpath(
+            os.path.join(out_dir, f"turn_{idx2:02d}_assistant.wav")
+        )
+        sf.write(final_path, audio_int16, sr)
+
+        st = dict(st)
+        recs = dict(st.get("recordings", {}))
+        recs[idx2] = final_path
+        st["recordings"] = recs
+        st["rec_phase"] = "preview"
+
+        # Write partial progress
+        try:
+            from progress_tracking import write_progress
+            write_progress(
+                st["output_dir"],
+                last_recorded_turn=idx2,
+                recorded_count=len(st["recordings"]),
+            )
+        except Exception as exc:
+            print(f"[progress] write failed: {exc}")
+
+        return st, gr.update(value=render_recording_html(st, collab))
+
+    mic_audio.stop_recording(
+        fn=_on_mic_stop,
+        inputs=[state, mic_audio, collab_state],
+        outputs=[state, recording_html],
         show_progress="hidden",
     )
 
