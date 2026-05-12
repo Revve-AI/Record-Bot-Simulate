@@ -524,6 +524,9 @@ def progress_html(current: int, total: int) -> str:
 #  11  done_panel        visibility
 #  12  finish_msg        markdown value
 def _render(state: dict):
+    # Mark thời điểm render — dùng để guard action_next khỏi advance nhầm
+    # khi user_audio.stop event bắn ảo do DOM remount.
+    state["_last_render_t"] = time.time()
     dialog = state.get("dialog", [])
     idx = state.get("current_turn", 0)
     total = len(dialog)
@@ -665,6 +668,14 @@ def action_next(state: dict):
     if idx >= len(dialog) or dialog[idx]["role"] != "user":
         # TRUE no-op cho trường hợp user_audio.stop bắn nhầm ở turn assistant
         return tuple([state] + [gr.update() for _ in range(13)])
+
+    # GUARD: bỏ qua nếu user_audio.stop fire ngay sau khi vừa render
+    # (DOM re-mount audio element → fire stop ảo, audio chưa kịp phát xong).
+    # Yêu cầu cách render hiện tại ≥ 1.5s mới được advance.
+    last_render = state.get("_last_render_t", 0.0)
+    if time.time() - last_render < 1.5:
+        return tuple([state] + [gr.update() for _ in range(13)])
+
     time.sleep(USER_PAUSE_SEC)
     state["current_turn"] = idx + 1
     return _render(state)
