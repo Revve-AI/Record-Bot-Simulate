@@ -4,10 +4,10 @@
 cuộc hội thoại đã có sẵn. Hệ thống tự động:
 
 - Đọc các file `.dialog` trong thư mục đầu vào (đường dẫn do người dùng chọn).
-- **Tự động** phát audio khách hàng (turn `user`) → khi audio kết thúc thì
-  nghỉ 1s rồi sang turn tiếp theo.
-- Khi đến turn `assistant` thì **dừng chờ cộng tác viên** bấm bắt đầu ghi âm;
-  silero-vad **tự dừng khi im lặng 1.5 giây**.
+- **Tự động** phát audio khách hàng (turn `user`, cắt thẳng từ wav gốc theo
+  timestamp trong dialog) → khi audio kết thúc thì nghỉ 1s rồi sang turn tiếp.
+- Khi đến turn `assistant` thì **dừng chờ cộng tác viên** bấm ghi âm; CTV
+  bấm nút stop để kết thúc.
 - Chuẩn hoá viết hoa và dấu câu cho mọi văn bản hiển thị.
 - Lưu kết quả thành các file `.wav` + `dialog.json` + `dialog_normalized.dialog`.
 - **Đánh dấu hội thoại đã hoàn tất** (✅) và lần mở app sau chỉ hiện hội thoại
@@ -21,11 +21,8 @@ UI tiếng Việt, nút lớn, hướng dẫn rõ ràng cho người không chuy
 
 - **Python**: 3.10 hoặc mới hơn.
 - **Hệ điều hành**: macOS / Linux / Windows.
-- **Micro hoạt động** (cắm tai nghe có mic được khuyến nghị).
-- **PortAudio** (do `sounddevice` yêu cầu):
-  - macOS: `brew install portaudio`
-  - Ubuntu / Debian: `sudo apt install -y libportaudio2 libsndfile1`
-  - Windows: tự cài kèm khi `pip install sounddevice` (không cần thao tác thêm).
+- **Micro hoạt động** (cắm tai nghe có mic được khuyến nghị) — trình duyệt
+  sẽ xin quyền truy cập mic lần đầu chạy.
 
 ---
 
@@ -42,9 +39,6 @@ source .venv/bin/activate          # Windows: .venv\Scripts\activate
 pip install --upgrade pip
 pip install -r requirements.txt
 ```
-
-Lần đầu chạy, `silero-vad` sẽ tự tải mô hình (~1.5 MB) về cache. Bạn cần có
-internet ở lần chạy đầu tiên.
 
 ---
 
@@ -168,10 +162,8 @@ Ví dụ `dialog.json`:
 | Vấn đề | Cách xử lý |
 | --- | --- |
 | Không thấy file hội thoại trong dropdown | Kiểm tra đường dẫn **Thư mục hội thoại** rồi bấm **🔄 Quét thư mục** |
-| Audio khách hàng không phát | App dựa vào `silero-vad` để tách audio; nếu file `.wav` quá nhiễu, có thể không khớp số segment. Bấm **Tiếp theo** để bỏ qua. |
-| App không nhận giọng / không tự dừng | Kiểm tra micro mặc định của hệ điều hành. Trên macOS phải cấp quyền **Microphone** cho Terminal/Python ở *System Settings → Privacy & Security*. |
-| Tự dừng quá sớm khi đang đọc | Bạn đang dừng > 1.5 giây giữa câu. Đọc liền mạch hơn, hoặc chỉnh `SILENCE_MS` trong `app.py`. |
-| Tự dừng quá muộn / không dừng | Tăng nhẹ `threshold` trong `VADIterator` (mặc định 0.5) hoặc giảm `SILENCE_MS`. |
+| Audio khách hàng không phát | App cắt audio theo `start_sample` / `end_sample` trong file `.dialog`; turn nào thiếu timestamp sẽ không có audio. Bấm **Bỏ qua câu này** để sang turn kế. |
+| Trình duyệt không nhận giọng | Kiểm tra trình duyệt đã được cấp quyền **Microphone** (icon mic trên thanh URL). Trên macOS phải cấp quyền Microphone cho trình duyệt ở *System Settings → Privacy & Security*. |
 
 ---
 
@@ -181,10 +173,9 @@ Sửa các hằng số ở đầu `app.py`:
 
 ```python
 SAMPLE_RATE         = 16000   # tần số lấy mẫu micro
-SILENCE_MS          = 1500    # ms im lặng để tự dừng
-USER_PAUSE_SEC      = 1.0     # giây nghỉ giữa các turn user
+USER_PAUSE_SEC      = 0.6     # giây nghỉ giữa các turn user
 MAX_RECORDING_SEC   = 90      # giới hạn an toàn 1 lần ghi
-DEFAULT_INPUT_DIR   = "../vib_call_20260115-224538"
+DEFAULT_INPUT_DIR   = "./input"
 DEFAULT_OUTPUT_DIR  = "./output"
 ```
 

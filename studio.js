@@ -78,11 +78,76 @@
     setHiddenTextbox("studio-action-payload", payload);
   }
 
+  // ----- loading overlay -----
+  // Gradio nuốt ~300-800ms để đọc wav + render recording HTML. Trong khi đó
+  // picker_view đã ẩn nên user thấy trắng. Phủ overlay tức thì cho phản hồi
+  // ngay; MutationObserver tự gỡ khi recording HTML đã vào DOM.
+  function showStudioLoadingOverlay(message) {
+    let el = document.getElementById("studio-loading-overlay");
+    if (el) return;
+    el = document.createElement("div");
+    el.id = "studio-loading-overlay";
+    el.className = "studio-loading-overlay";
+    el.innerHTML =
+      "<div class='studio-loading-card'>" +
+        "<div class='studio-loading-spinner'></div>" +
+        "<div class='studio-loading-label'>" +
+          (message || "Đang mở hội thoại…") +
+        "</div>" +
+      "</div>";
+    document.body.appendChild(el);
+
+    // Wait until the recording shell is BOTH in DOM AND visible. Gradio
+    // applies `gr.update(visible=True)` on the Column wrapper and updates the
+    // inner HTML in the same response, but the DOM mutations don't apply
+    // atomically — innerHTML can fire MutationObserver before the column's
+    // `display:none` is cleared. The <img onerror> rail-scroll trigger fires
+    // either way (browser parses <img> in hidden DOM), so we can't rely on
+    // "shell exists" alone — must also check offsetParent.
+    function isVisibleNow() {
+      const shell = document.querySelector(".studio-rec-shell");
+      return !!(shell && shell.offsetParent !== null);
+    }
+    const obs = new MutationObserver(() => {
+      if (isVisibleNow()) {
+        hideStudioLoadingOverlay();
+        obs.disconnect();
+      }
+    });
+    obs.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ["style", "class"] });
+
+    // Belt-and-suspenders: poll every 80ms in case Gradio toggles visibility
+    // via a CSS class change on an ancestor that the observer didn't catch.
+    const pollId = setInterval(() => {
+      if (isVisibleNow()) {
+        hideStudioLoadingOverlay();
+        clearInterval(pollId);
+        obs.disconnect();
+      }
+    }, 80);
+
+    // Hard timeout — tránh kẹt nếu có lỗi server không kích hoạt re-render.
+    setTimeout(() => {
+      hideStudioLoadingOverlay();
+      obs.disconnect();
+      clearInterval(pollId);
+    }, 10000);
+  }
+
+  function hideStudioLoadingOverlay() {
+    const el = document.getElementById("studio-loading-overlay");
+    if (el) el.remove();
+  }
+
   // ----- click delegation -----
   function installClickDelegate() {
     document.addEventListener("click", (e) => {
       const card = e.target.closest("[data-card-dialog]");
       if (card) {
+        // Switch view ngay tức thì — không đợi server. Overlay phủ trong khi
+        // recording_html còn rỗng để user không thấy trắng.
+        setStudioView("recording");
+        showStudioLoadingOverlay("Đang mở hội thoại…");
         dispatchAction("open_conversation", { dialog: card.dataset.cardDialog });
         return;
       }
@@ -95,18 +160,22 @@
 
       const resume = e.target.closest("[data-resume-cta]");
       if (resume) {
+        setStudioView("recording");
+        showStudioLoadingOverlay("Đang mở hội thoại tiếp theo…");
         dispatchAction("resume_next", {});
         return;
       }
 
       const back = e.target.closest("[data-back-to-picker]");
       if (back) {
+        setStudioView("picker");
         dispatchAction("back_to_picker", {});
         return;
       }
 
       const finishBtn = e.target.closest("[data-finish]");
       if (finishBtn) {
+        setStudioView("picker");
         dispatchAction("finish", {});
         return;
       }
@@ -200,12 +269,23 @@
 
   // ----- keyboard shortcuts -----
   function installKeyboardShortcuts() {
+    // Phím tắt CHỈ chạy khi đang ở recording view. Trên picker, Enter có thể
+    // race với click vừa rồi (server chưa kịp đổi view → kbd_enter dispatch
+    // với view cũ = "picker" làm UI nhảy về home).
+    function isRecordingViewActive() {
+      const rec = document.querySelector(".studio-recording");
+      if (!rec) return false;
+      // Gradio ẩn Column bằng display:none trên wrapper.
+      return rec.offsetParent !== null;
+    }
+
     document.addEventListener("keydown", (e) => {
       // Don't fire when typing in an input
       const t = e.target;
       if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) {
         return;
       }
+      if (!isRecordingViewActive()) return;
       switch (e.key) {
         case " ":
           e.preventDefault();
@@ -219,6 +299,7 @@
           // else: nothing visible to act on — swallow Space silently
           break;
         case "Enter":
+          e.preventDefault();
           dispatchAction("kbd_enter", {});
           break;
         case "r": case "R":
@@ -228,6 +309,7 @@
           dispatchAction("kbd_skip", {});
           break;
         case "Escape":
+          setStudioView("picker");
           dispatchAction("kbd_back", {});
           break;
       }
@@ -636,8 +718,39 @@
     }, 1000);
   }
 
+  // ----- view toggle (CSS-driven via body[data-studio-view]) -----
+  // Gradio 6.14's gr.update(visible=...) on Column doesn't apply reliably in
+  // the same response as a child HTML value update — gây cảnh "trắng màn,
+  // phải bấm Enter để hiện". Workaround: cả 2 Column luôn visible=True,
+  // hiển thị thực sự do CSS rule trên body[data-studio-view] quyết định.
+  function setStudioView(v) {
+    if (v !== "picker" && v !== "recording") return;
+    document.body.dataset.studioView = v;
+  }
+
+  function installViewMarkerObserver() {
+    // Server gửi <span data-studio-view-marker='picker|recording'> mỗi lần
+    // re-render → đọc và sync sang body.
+    function syncFromMarker() {
+      const m = document.querySelector("[data-studio-view-marker]");
+      if (!m) return;
+      const v = m.getAttribute("data-studio-view-marker");
+      if (v === "picker" || v === "recording") setStudioView(v);
+    }
+    syncFromMarker();
+    const obs = new MutationObserver(syncFromMarker);
+    obs.observe(document.body, {
+      childList: true, subtree: true, attributes: true,
+      attributeFilter: ["data-studio-view-marker"],
+    });
+  }
+
   // ----- boot -----
   function boot() {
+    // Default view = picker (matches initial server marker). Set IMMEDIATELY
+    // so CSS rules have something to act on before first server roundtrip.
+    if (!document.body.dataset.studioView) setStudioView("picker");
+    installViewMarkerObserver();
     installClickDelegate();
     installKeyboardShortcuts();
     warnIfInsecureContext();

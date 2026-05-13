@@ -1,16 +1,14 @@
 """Studio ghi âm trợ lý ảo — Gradio app.
 
-Đọc các file .dialog trong thư mục đầu vào, phát audio user theo từng turn,
-ghi âm phần trợ lý qua micro của trình duyệt (gr.Audio sources=microphone)
-— CTV bấm nút mic để bắt đầu thu, bấm nút "🛑 KẾT THÚC GHI ÂM" lớn để dừng.
-
-silero-vad chỉ dùng cho 2 việc:
-  1) Tách audio user theo timestamps trong dialog + trim silence dài.
-  2) (Không còn) Auto-stop khi im lặng — đã bỏ vì mic giờ client-side.
+Đọc các file .dialog trong thư mục đầu vào, phát audio user theo từng turn
+(cắt thẳng từ wav gốc theo timestamp), ghi âm phần trợ lý qua micro của
+trình duyệt (gr.Audio sources=microphone) — CTV bấm nút mic để bắt đầu thu,
+bấm nút "🛑 KẾT THÚC GHI ÂM" lớn để dừng.
 """
 from __future__ import annotations
 
 import base64 as _base64
+import hashlib
 import io
 import json
 import urllib.parse
@@ -36,12 +34,10 @@ from recording_backend import (
     session_output_dir,
     is_dialog_done,
     build_dropdown_choices,
-    trim_silences,
     segment_user_turns,
 )
 
 # ---------- Config (app-only) ----------
-SILENCE_MS = 1500                # tự dừng khi im lặng 1.5s
 USER_PAUSE_SEC = 0.6             # nghỉ ngắn sau turn user trước khi sang câu kế
 MAX_RECORDING_SEC = 90           # an toàn: dừng cứng sau 90s
 DEFAULT_INPUT_DIR = "./input"
@@ -51,30 +47,6 @@ DEFAULT_OUTPUT_DIR = "./output"
 # ---------- UI rendering helpers ----------
 
 
-def get_trimmed_user_audio(state: dict, idx: int):
-    """Lazy-trim audio user turn `idx`: lần đầu chạy silero-vad, lần sau lấy cache.
-
-    Nếu trim vượt ngưỡng thời gian (>800ms) thì giữ nguyên segment thô
-    để tránh treo UI.
-    """
-    raw = state.get("user_audio_per_turn", {}).get(idx)
-    if raw is None:
-        return None
-    cache = state.setdefault("_trim_cache", {})
-    if idx in cache:
-        return cache[idx]
-    sr, seg = raw
-    t0 = time.time()
-    trimmed = trim_silences(seg, sr)
-    dt = time.time() - t0
-    if dt > 0.3:
-        print(f"[trim] turn {idx}: silero-vad mất {1000*dt:.0f}ms (seg {len(seg)} samples)")
-    if trimmed is None or len(trimmed) == 0:
-        trimmed = seg
-    cache[idx] = (sr, trimmed)
-    return cache[idx]
-
-
 # Thư mục lưu user audio tạm để serve qua HTTP.
 # Đặt cạnh output/ (cùng thư mục app) thay vì /tmp — vì /tmp trên macOS là
 # /var/folders/.../T/ có symlink /var → /private/var khiến Gradio `abs_path.exists()`
@@ -82,6 +54,53 @@ def get_trimmed_user_audio(state: dict, idx: int):
 _HERE = os.path.dirname(os.path.abspath(__file__))
 USER_AUDIO_TMPDIR = os.path.realpath(os.path.join(_HERE, "output", ".user_audio_cache"))
 os.makedirs(USER_AUDIO_TMPDIR, exist_ok=True)
+
+
+def _user_audio_file_path(wav_path: str, idx: int) -> str:
+    """Đường dẫn ổn định cho 1 segment user. Cùng (wav_path, idx)
+    → cùng file → browser cache được. Hash giúp tránh va chạm khi 2 dialog
+    có prefix giống nhau."""
+    stem = Path(wav_path).stem
+    h = hashlib.md5(wav_path.encode("utf-8")).hexdigest()[:8]
+    return os.path.join(USER_AUDIO_TMPDIR, f"{stem[:32]}_{h}_u{idx:03d}.wav")
+
+
+def _write_audio_tuple(path: str, audio_tuple) -> bool:
+    if audio_tuple is None:
+        return False
+    sr, arr = audio_tuple
+    try:
+        arr_int16 = np.clip(np.asarray(arr) * 32767.0, -32768, 32767).astype(np.int16)
+        sf.write(path, arr_int16, sr, format="WAV")
+        return True
+    except Exception as exc:
+        print(f"[_write_audio_tuple] {exc}")
+        return False
+
+
+def file_static_url(path: str | None) -> str | None:
+    """URL Gradio static cho 1 file có sẵn trên disk (assistant recordings)."""
+    if not path or not os.path.exists(path):
+        return None
+    return f"/gradio_api/file={urllib.parse.quote(os.path.realpath(path))}"
+
+
+def user_audio_static_url(state: dict, idx: int) -> str | None:
+    """URL stream cho 1 user-turn. Ghi xuống disk lần đầu, sau đó chỉ trả
+    URL (browser tự cache theo URL). Thay base64 inline để HTML response
+    nhỏ + browser stream khi play, không decode đồng bộ."""
+    raw = state.get("user_audio_per_turn", {}).get(idx)
+    if raw is None:
+        return None
+    wav_path = state.get("wav_path") or ""
+    if not wav_path:
+        # Không có key ổn định → fallback base64 cho an toàn.
+        return audio_to_data_url(raw)
+    out_path = _user_audio_file_path(wav_path, idx)
+    if not os.path.exists(out_path):
+        if not _write_audio_tuple(out_path, raw):
+            return None
+    return f"/gradio_api/file={urllib.parse.quote(out_path)}"
 
 
 def audio_to_data_url(audio_or_path) -> str | None:
@@ -133,10 +152,10 @@ def _bubble_html(state: dict, i: int, role_state: str) -> str:
         cache: dict = state.setdefault("_audio_url_cache", {})
         cache_key = ("u", i) if is_user else ("a", i)
         if cache_key not in cache:
-            # User audio: dùng bản trimmed (lazy + cached)
-            # Assistant: lấy filepath đã ghi
+            # User audio: segment cắt thẳng từ wav gốc.
+            # Assistant: lấy filepath đã ghi.
             src = (
-                get_trimmed_user_audio(state, i)
+                state.get("user_audio_per_turn", {}).get(i)
                 if is_user
                 else state.get("recordings", {}).get(i)
             )
@@ -312,8 +331,7 @@ def _render(state: dict):
     out[1] = gr.update(value=progress_html(idx, total))
 
     if turn["role"] == "user":
-        # Lazy-trim audio cho turn hiện tại (cache trong state)
-        audio = get_trimmed_user_audio(state, idx)
+        audio = state.get("user_audio_per_turn", {}).get(idx)
         out[4] = gr.update(visible=True)  # user_panel
         if audio is not None:
             out[5] = gr.update(value=audio, autoplay=True)
@@ -652,7 +670,7 @@ def load_conversation_state(input_dir: str, dialog_name: str,
     else:
         current_turn = 0
 
-    return {
+    state = {
         "collab_name": collab_name,
         "dialog_name": dialog_name,
         "dialog_path": dialog_path,
@@ -664,6 +682,7 @@ def load_conversation_state(input_dir: str, dialog_name: str,
         "current_turn": current_turn,
         "rec_phase": "idle",
     }
+    return state
 
 
 def _render_rail(st: dict) -> str:
@@ -757,8 +776,9 @@ def _render_hero(st: dict) -> str:
 
     turn = dialog[idx]
     if turn["role"] == "user":
-        # Auto-playing user turn — embed an <audio> element with data URL
-        url = audio_to_data_url(get_trimmed_user_audio(st, idx))
+        # Auto-playing user turn — browser streams qua /gradio_api/file=
+        # thay vì base64 inline. HTML response nhỏ + ít block khi mạng yếu.
+        url = user_audio_static_url(st, idx)
         audio_tag = (
             f"<audio autoplay onended=\"window.__studioAutoNext && window.__studioAutoNext()\" "
             f"src=\"{url}\" style=\"display:none\"></audio>" if url else ""
@@ -850,9 +870,9 @@ def render_recording_html(st: dict, collab: str) -> str:
     if play_req:
         kind, ridx = play_req
         if kind == "user":
-            url = audio_to_data_url(get_trimmed_user_audio(st, ridx))
+            url = user_audio_static_url(st, ridx)
         else:
-            url = audio_to_data_url(st.get("recordings", {}).get(ridx))
+            url = file_static_url(st.get("recordings", {}).get(ridx))
         if url:
             # Unique id + <img onerror> trick to force a fresh play every
             # click. data-nonce on <audio autoplay> alone doesn't work because
@@ -880,10 +900,9 @@ def render_recording_html(st: dict, collab: str) -> str:
         items = []
         for i, turn in enumerate(dialog):
             if turn["role"] == "user":
-                src = get_trimmed_user_audio(st, i)
+                url = user_audio_static_url(st, i)
             else:
-                src = st.get("recordings", {}).get(i)
-            url = audio_to_data_url(src)
+                url = file_static_url(st.get("recordings", {}).get(i))
             if url:
                 items.append({"idx": i, "url": url})
         if items:
@@ -1079,15 +1098,27 @@ with gr.Blocks(
         elem_classes=["studio-hidden"],
         show_label=False,
     )
+    # View marker — studio.js MutationObserver đọc data-studio-view-marker
+    # rồi cập nhật <body data-studio-view> để CSS toggle picker/recording.
+    studio_view_marker = gr.HTML(
+        "<span data-studio-view-marker='picker' style='display:none'></span>",
+        elem_id="studio-view-marker",
+    )
 
     # ───── Picker view (top-level Column) ─────
+    # CẢ HAI Column luôn visible=True. Hiển thị/ẩn được điều khiển bằng
+    # `data-studio-view` trên <body> (đặt bởi studio.js + CSS rules):
+    # - body[data-studio-view="picker"]    → ẩn .studio-recording
+    # - body[data-studio-view="recording"] → ẩn .studio-picker
+    # Lý do: gr.update(visible=...) trên Column ở Gradio 6.14 đôi khi không
+    # apply đồng bộ với value-update của child HTML — gây cảnh user thấy
+    # trắng màn rồi phải nhấn Enter để force re-render.
     with gr.Column(visible=True, elem_classes=["studio-picker"]) as picker_view:
         picker_html = gr.HTML(
             "<div style='padding:40px;text-align:center;color:#8f8a7a;'>Đang tải...</div>"
         )
 
-    # ───── Recording view (hidden until user picks) ─────
-    with gr.Column(visible=False, elem_classes=["studio-recording"]) as recording_view:
+    with gr.Column(visible=True, elem_classes=["studio-recording"]) as recording_view:
         recording_html = gr.HTML("")
         # The mic Audio component — kept as the only "real" Gradio input.
         # CSS minimises its chrome; clicks come from the rendered HTML.
@@ -1283,13 +1314,21 @@ with gr.Blocks(
             gr.update(value=None) if action in mic_reset_actions else gr.update()
         )
 
+        # View toggle giờ làm bằng `data-studio-view` trên <body> (do studio.js
+        # đọc `view` qua marker này). KHÔNG dùng gr.update(visible=...) trên
+        # Column nữa — Gradio 6.14 hay không apply kịp khiến UI trắng cho tới
+        # khi có event thứ 2. Marker là 1 HTML invisible mà JS đọc bằng
+        # MutationObserver để cập nhật `body[data-studio-view]`.
+        view_marker = (
+            f"<span data-studio-view-marker='{view}' style='display:none'></span>"
+        )
+
         return (
             view, collab, filt, st,
             picker_update,
             recording_update,
             mic_update,
-            gr.update(visible=(view == "picker")),
-            gr.update(visible=(view == "recording")),
+            gr.update(value=view_marker),
         )
 
     # Fire dispatcher on textbox change — every dispatchAction() write to
@@ -1302,7 +1341,7 @@ with gr.Blocks(
         outputs=[
             view_state, collab_state, filter_state, state,
             picker_html, recording_html, mic_audio,
-            picker_view, recording_view,
+            studio_view_marker,
         ],
         show_progress="hidden",
     )

@@ -62,6 +62,12 @@ footer { display: none !important; }
   overflow: hidden;
 }
 
+/* View toggle — bypass Gradio's visible=... vốn không apply ổn định trên
+   Gradio 6.14. body[data-studio-view] do studio.js set theo marker từ server
+   (và set ngay trên click cho phản hồi tức thì). */
+body[data-studio-view="picker"]    .studio-recording { display: none !important; }
+body[data-studio-view="recording"] .studio-picker    { display: none !important; }
+
 /* ============================================================
    Top bar (shared by picker + recording)
    ============================================================ */
@@ -706,3 +712,43 @@ footer { display: none !important; }
 
 /* The hidden orchestration components — invisible but in DOM */
 .studio-hidden { display: none !important; }
+
+/* ============================================================
+   Loading overlay — shown while server loads a conversation
+   ============================================================ */
+.studio-loading-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 100001;
+  background: rgba(31, 29, 24, 0.45);
+  backdrop-filter: blur(3px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  animation: studio-modal-fade .12s ease-out;
+}
+.studio-loading-card {
+  background: var(--surface);
+  border-radius: var(--radius-lg);
+  box-shadow: 0 24px 64px -12px rgba(0, 0, 0, .35);
+  padding: 28px 32px;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  border: 1px solid var(--border);
+}
+.studio-loading-spinner {
+  width: 28px;
+  height: 28px;
+  border: 3px solid var(--border);
+  border-top-color: var(--brand);
+  border-radius: 50%;
+  animation: studio-loading-spin .9s linear infinite;
+}
+.studio-loading-label {
+  font: 600 16px/1.3 system-ui, sans-serif;
+  color: var(--text);
+}
+@keyframes studio-loading-spin {
+  to { transform: rotate(360deg); }
+}
