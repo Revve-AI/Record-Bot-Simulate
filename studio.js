@@ -725,7 +725,28 @@
   // hiển thị thực sự do CSS rule trên body[data-studio-view] quyết định.
   function setStudioView(v) {
     if (v !== "picker" && v !== "recording") return;
+    const prev = document.body.dataset.studioView;
     document.body.dataset.studioView = v;
+    // Khi rời recording view → dừng mọi audio đang phát. Nếu không, playlist
+    // "Nghe toàn bộ" (chạy client-side) hoặc một single-play audio sẽ tiếp
+    // tục kêu sau khi user đã quay về picker / hội thoại khác.
+    if (prev === "recording" && v !== "recording") {
+      stopAllStudioAudio();
+    }
+  }
+
+  function stopAllStudioAudio() {
+    try {
+      if (window.studioStopPlaylist) window.studioStopPlaylist();
+    } catch (_) {}
+    // Single-play audio elements được inject vào DOM mỗi lần user click ▶
+    // trên 1 turn (id bắt đầu bằng `studio-play-`). HTML hero/rail cũng có
+    // <audio autoplay> cho khách hàng. Pause hết.
+    document.querySelectorAll(
+      "audio[id^='studio-play-'], .studio-rec-hero audio, .studio-rec-shell audio"
+    ).forEach((a) => {
+      try { a.pause(); a.currentTime = 0; } catch (_) {}
+    });
   }
 
   function installViewMarkerObserver() {

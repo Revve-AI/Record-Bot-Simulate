@@ -79,10 +79,22 @@ def _write_audio_tuple(path: str, audio_tuple) -> bool:
 
 
 def file_static_url(path: str | None) -> str | None:
-    """URL Gradio static cho 1 file có sẵn trên disk (assistant recordings)."""
+    """URL Gradio static cho 1 file có sẵn trên disk (assistant recordings).
+
+    Append `?t=<mtime_ns>` để bust browser cache khi CTV thu lại — file ghi đè
+    cùng đường dẫn nên không có nonce thì browser phát bản cũ đã cache.
+    """
     if not path or not os.path.exists(path):
         return None
-    return f"/gradio_api/file={urllib.parse.quote(os.path.realpath(path))}"
+    real = os.path.realpath(path)
+    try:
+        mtime = os.path.getmtime(real)
+    except OSError:
+        mtime = 0
+    return (
+        f"/gradio_api/file={urllib.parse.quote(real)}"
+        f"?t={int(mtime * 1000)}"
+    )
 
 
 def user_audio_static_url(state: dict, idx: int) -> str | None:
