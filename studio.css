@@ -480,6 +480,21 @@ body[data-studio-view="recording"] .studio-picker    { display: none !important;
   box-shadow: var(--shadow-card);
 }
 .hero-turn-card.recording { border-color: var(--brand); }
+/* Editable assistant text — cursor, hover hint, focus outline */
+.hero-turn-editable {
+  cursor: text;
+  outline: none;
+  transition: border-color .15s, background-color .15s, box-shadow .15s;
+}
+.hero-turn-editable:hover {
+  border-color: var(--brand-soft);
+  background: #fffdf9;
+}
+.hero-turn-editable:focus {
+  border-color: var(--brand);
+  background: #fffdf9;
+  box-shadow: 0 0 0 3px var(--brand-soft);
+}
 .hero-rec-btn {
   width: 80px; height: 80px;
   border-radius: 50%;

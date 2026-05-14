@@ -767,6 +767,29 @@
   }
 
   // ----- boot -----
+  // ----- inline edit cho text turn assistant -----
+  function installAssistantTextEditor() {
+    // blur không bubble → bắt ở pha capture
+    document.addEventListener("blur", (e) => {
+      const t = e.target;
+      if (!t || !t.dataset || !("editAssistantText" in t.dataset)) return;
+      const idx = parseInt(t.dataset.editAssistantText, 10);
+      if (isNaN(idx)) return;
+      const text = (t.textContent || "").trim();
+      if (!text) return;  // không cho phép xoá rỗng
+      dispatchAction("edit_assistant_text", { idx, text });
+    }, true);
+    // Enter trong contenteditable: commit (blur) thay vì xuống dòng.
+    document.addEventListener("keydown", (e) => {
+      const t = e.target;
+      if (!t || !t.dataset || !("editAssistantText" in t.dataset)) return;
+      if (e.key === "Enter" && !e.shiftKey) {
+        e.preventDefault();
+        t.blur();
+      }
+    });
+  }
+
   function boot() {
     // Default view = picker (matches initial server marker). Set IMMEDIATELY
     // so CSS rules have something to act on before first server roundtrip.
@@ -774,6 +797,7 @@
     installViewMarkerObserver();
     installClickDelegate();
     installKeyboardShortcuts();
+    installAssistantTextEditor();
     warnIfInsecureContext();
     installLiveUIWatcher();
     // loadStoredName waits internally for the Gradio components to appear,

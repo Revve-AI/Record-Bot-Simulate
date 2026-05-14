@@ -570,17 +570,55 @@ def action_save_continue(state: dict):
     return _render(state)
 
 
+def write_text_mapping(state: dict) -> None:
+    """Lưu `text_mapping.json` — mapping `text gốc (.dialog) → text cuối`
+    cho mỗi turn assistant đã được CTV thu âm.
+
+    Gọi sau mỗi `_on_mic_stop` (turn vừa thu xong) và mỗi `edit_assistant_text`
+    (CTV sửa lại text) để file luôn cập nhật, không phải đợi tới `action_finish`.
+    """
+    out_dir = state.get("output_dir")
+    dialog = state.get("dialog") or []
+    recordings = state.get("recordings") or {}
+    if not out_dir or not dialog:
+        return
+    mapping = []
+    for i, t in enumerate(dialog):
+        if t.get("role") != "assistant" or i not in recordings:
+            continue
+        original = t.get("text_raw", "")
+        final = t.get("text", "")
+        mapping.append({
+            "turn_index": i,
+            "audio_file": f"turn_{i:02d}_assistant.wav",
+            "original_text": original,
+            "final_text": final,
+            "edited": original.strip() != final.strip(),
+        })
+    try:
+        path = os.path.join(out_dir, "text_mapping.json")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(mapping, f, ensure_ascii=False, indent=2)
+    except Exception as exc:
+        print(f"[write_text_mapping] failed: {exc}")
+
+
 def action_finish(state: dict):
     out_dir = state["output_dir"]
     dialog = state["dialog"]
 
-    # 1) lưu user audio
+    # 1) lưu user audio + text song song (turn_NN_user.wav / turn_NN_user.txt)
     for i, t in enumerate(dialog):
         if t["role"] == "user":
             seg = state["user_audio_per_turn"].get(i)
             if seg is not None:
                 sr, arr = seg
                 sf.write(os.path.join(out_dir, f"turn_{i:02d}_user.wav"), arr, sr)
+                with open(
+                    os.path.join(out_dir, f"turn_{i:02d}_user.txt"),
+                    "w", encoding="utf-8",
+                ) as ftxt:
+                    ftxt.write(t["text"])
 
     # 2) lưu dialog đã chuẩn hoá
     with open(os.path.join(out_dir, "dialog_normalized.dialog"), "w", encoding="utf-8") as f:
@@ -614,6 +652,9 @@ def action_finish(state: dict):
     }
     with open(os.path.join(out_dir, "dialog.json"), "w", encoding="utf-8") as f:
         json.dump(meta, f, ensure_ascii=False, indent=2)
+
+    # Snapshot cuối cùng của mapping `text gốc → text sửa` cho turn assistant.
+    write_text_mapping(state)
 
     # Conversation fully done — drop partial-progress file.
     try:
@@ -681,6 +722,24 @@ def load_conversation_state(input_dir: str, dialog_name: str,
         current_turn = min(max(recordings.keys()) + 1, len(dialog))
     else:
         current_turn = 0
+
+    # Với mỗi turn assistant đã có .wav trên disk → ưu tiên đọc text từ
+    # `turn_NN_assistant.txt` (bản CTV đã sửa trong session trước), thay vì
+    # text mặc định từ .dialog. Nếu .txt không tồn tại / rỗng, giữ nguyên text
+    # parse được từ .dialog.
+    for i, rec_path in recordings.items():
+        if i >= len(dialog) or dialog[i].get("role") != "assistant":
+            continue
+        txt_path = rec_path.replace(".wav", ".txt")
+        if not os.path.exists(txt_path):
+            continue
+        try:
+            with open(txt_path, encoding="utf-8") as ftxt:
+                saved = ftxt.read().strip()
+        except OSError:
+            continue
+        if saved:
+            dialog[i]["text"] = saved
 
     state = {
         "collab_name": collab_name,
@@ -821,7 +880,9 @@ def _render_hero(st: dict) -> str:
     elif phase == "preview":
         return (
             "<span class='hero-role-tag'>✅ Đã thu xong — nghe lại</span>"
-            f"<div class='hero-turn-card'>{turn['text']}</div>"
+            f"<div class='hero-turn-card hero-turn-editable' "
+            f"contenteditable='true' spellcheck='false' "
+            f"data-edit-assistant-text='{idx}'>{turn['text']}</div>"
             "<div class='hero-audio-bar'>"
             f"<button class='play-circle' data-play-assistant='{idx}'>▶</button>"
             "<div class='scrub'><div></div></div>"
@@ -831,14 +892,19 @@ def _render_hero(st: dict) -> str:
             "<button class='hero-btn secondary' data-rerec>↻ Thu lại</button>"
             "<button class='hero-btn primary' data-save-next>💾 Lưu & câu kế →</button>"
             "</div>"
-            "<div class='hero-hint'><span class='hero-kbd'>Enter</span> để lưu · <span class='hero-kbd'>R</span> để thu lại</div>"
+            "<div class='hero-hint'>✏️ Bấm vào câu trên để sửa · "
+            "<span class='hero-kbd'>Enter</span> để lưu · "
+            "<span class='hero-kbd'>R</span> để thu lại</div>"
         )
     # idle
     return (
         "<span class='hero-role-tag'>Đến lượt bạn — đọc câu này</span>"
-        f"<div class='hero-turn-card'>{turn['text']}</div>"
+        f"<div class='hero-turn-card hero-turn-editable' "
+        f"contenteditable='true' spellcheck='false' "
+        f"data-edit-assistant-text='{idx}'>{turn['text']}</div>"
         "<button class='hero-rec-btn' data-rec-start><span class='inner'></span></button>"
-        "<div class='hero-hint'><b>Bấm để ghi âm</b> · hoặc <span class='hero-kbd'>Space</span></div>"
+        "<div class='hero-hint'>✏️ Bấm vào câu trên để sửa · "
+        "<b>bấm nút mic để ghi âm</b> · hoặc <span class='hero-kbd'>Space</span></div>"
     )
 
 
@@ -1298,8 +1364,41 @@ with gr.Blocks(
             # by clicking the right visible button. No Python action needed;
             # this branch exists just to swallow the action.
             pass
+        elif action == "edit_assistant_text":
+            # CTV sửa lại text turn assistant (contenteditable trong hero card).
+            # Cập nhật state SILENTLY — không re-render recording_html (xem
+            # skip_rerender_actions bên dưới) để tránh ghi đè DOM trong lúc
+            # user vẫn còn focus / cursor trong ô.
+            target = data.get("idx")
+            new_text = (data.get("text") or "").strip()
+            if target is not None and st and st.get("dialog") and new_text:
+                idx2 = int(target)
+                if 0 <= idx2 < len(st["dialog"]) and st["dialog"][idx2]["role"] == "assistant":
+                    st = dict(st)
+                    dialog = list(st["dialog"])
+                    turn = dict(dialog[idx2])
+                    turn["text"] = new_text
+                    dialog[idx2] = turn
+                    st["dialog"] = dialog
+                    # Nếu turn đã thu rồi (preview → quay lại sửa), ghi đè
+                    # turn_NN_assistant.txt ngay để file trên disk khớp state.
+                    rec_path = st.get("recordings", {}).get(idx2)
+                    if rec_path:
+                        try:
+                            with open(
+                                rec_path.replace(".wav", ".txt"),
+                                "w", encoding="utf-8",
+                            ) as ftxt:
+                                ftxt.write(new_text)
+                        except Exception as exc:
+                            print(f"[edit_assistant_text] txt save failed: {exc}")
+                    # Refresh mapping `text gốc → text cuối`.
+                    write_text_mapping(st)
 
-        # Re-render whichever view is active
+        # Re-render whichever view is active. `edit_assistant_text` cập nhật
+        # state silently — re-render ngay lúc đó sẽ thay innerHTML của
+        # contenteditable đang được CTV focus, làm mất cursor / dấu IME.
+        skip_rerender_actions = {"edit_assistant_text"}
         picker_update = (
             gr.update(value=render_picker_html(
                 DEFAULT_INPUT_DIR, DEFAULT_OUTPUT_DIR, collab, filt
@@ -1308,7 +1407,8 @@ with gr.Blocks(
         )
         recording_update = (
             gr.update(value=render_recording_html(st, collab))
-            if view == "recording" else gr.update()
+            if view == "recording" and action not in skip_rerender_actions
+            else gr.update()
         )
 
         # Reset mic_audio whenever the turn changes (so the previous take
@@ -1390,6 +1490,16 @@ with gr.Blocks(
                 os.path.join(out_dir, f"turn_{idx2:02d}_assistant.wav")
             )
             sf.write(final_path, audio_int16, sr)
+            # Lưu kèm transcript của turn (normalized text). Cùng filename, đổi .wav→.txt
+            try:
+                turn_text = st.get("dialog", [{}])[idx2].get("text", "")
+                with open(
+                    final_path.replace(".wav", ".txt"),
+                    "w", encoding="utf-8",
+                ) as ftxt:
+                    ftxt.write(turn_text)
+            except Exception as exc:
+                print(f"[mic_stop] txt save failed: {exc}")
         except Exception as exc:
             # Any failure in the read/process/write pipeline leaves no usable
             # recording. Reset to idle so the user can try again.
@@ -1414,6 +1524,9 @@ with gr.Blocks(
             )
         except Exception as exc:
             print(f"[progress] write failed: {exc}")
+
+        # Cập nhật mapping text gốc → text cuối cho các turn assistant đã thu.
+        write_text_mapping(st)
 
         return st, gr.update(value=render_recording_html(st, collab))
 
